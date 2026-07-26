@@ -8,7 +8,7 @@
  * All external dependencies are injected via the options object for testability.
  */
 
-import type { Settings, TabState, Conversation, ConversationMessage, SkillDefinition, ExtractedArticle } from "@shared/types";
+import type { Settings, TabState, Conversation, ConversationMessage, SkillDefinition, ExtractedArticle, ContextTabSnapshot } from "@shared/types";
 import type {
   SidebarToControllerMessage,
   ControllerToSidebarMessage,
@@ -182,6 +182,32 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
       // init handler
       // -----------------------------------------------------------------------
 
+      // Restores previously-added secondary context tabs (SF-1) from a
+      // persisted snapshot — content is left null and lazily re-extracted
+      // on demand (ensureContextContent), same as the primary tab restore.
+      // Must run AFTER the mode-establishing message (personaModeReady /
+      // conversationRestored) so the sidebar doesn't wipe these chips via
+      // its own "start of a fresh session" reset logic.
+      function restoreContextTabs(snapshots: ReadonlyArray<ContextTabSnapshot> | undefined): void {
+        for (const snap of snapshots ?? []) {
+          contextTabs.set(snap.tabId, { url: snap.url, title: snap.title, content: null, confidence: snap.confidence });
+          send({ type: "contextTabAdded", tabId: snap.tabId, url: snap.url, title: snap.title, confidence: snap.confidence });
+        }
+      }
+
+      // Persists the current in-memory context-tab set (minus the primary
+      // tab, which is the TabState entry itself) so it survives a reconnect.
+      function persistContextTabs(): void {
+        if (currentTabId === null) return;
+        if (!tabState.has(currentTabId)) return;
+        const snapshot: ContextTabSnapshot[] = [];
+        for (const [tabId, ctx] of contextTabs) {
+          if (tabId === currentTabId) continue;
+          snapshot.push({ tabId, url: ctx.url, title: ctx.title, confidence: ctx.confidence });
+        }
+        tabState.update(currentTabId, { contextTabs: snapshot });
+      }
+
       async function handleInit(tabId: number, initUrl?: string): Promise<void> {
         currentTabId = tabId;
         contextTabs.clear();
@@ -202,8 +228,10 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
               content: m.content,
               timestamp: m.timestamp,
               isPartial: m.isPartial,
+              model: m.model,
             }));
             send({ type: "personaModeReady", messages });
+            restoreContextTabs(cached.contextTabs);
             return;
           }
 
@@ -247,12 +275,14 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
             content: m.content,
             timestamp: m.timestamp,
             isPartial: m.isPartial,
+            model: m.model,
           }));
 
           send({ type: "conversationRestored", messages });
           // Rebuild context tab entry for the cached session (content lazily re-extracted on demand)
           contextTabs.set(tabId, { url: cached.url, title: cached.title, content: null, confidence: cached.extractionConfidence });
           send({ type: "contextTabAdded", tabId, url: cached.url, title: cached.title, confidence: cached.extractionConfidence });
+          restoreContextTabs(cached.contextTabs);
           return;
         }
 
@@ -376,11 +406,13 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
         const content = article.bodyMarkdown.slice(0, MAX_PAGE_CONTENT_CHARS);
         contextTabs.set(tabId, { url: article.sourceUrl, title: article.title, content, confidence: extractionResult.confidence });
         send({ type: "contextTabAdded", tabId, url: article.sourceUrl, title: article.title, confidence: extractionResult.confidence });
+        persistContextTabs();
       }
 
       function handleRemoveContextTab(tabId: number): void {
         contextTabs.delete(tabId);
         send({ type: "contextTabRemoved", tabId });
+        persistContextTabs();
       }
 
       async function handleGetOpenTabs(): Promise<void> {
@@ -481,7 +513,7 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
 
         const systemPrompt = activeSkills.length > 0
           ? buildCompositePrompt({ skills: activeSkills, articles })
-          : settings.ai.systemPrompt || buildDefaultSystemPrompt();
+          : settings.ai.systemPrompt || buildDefaultSystemPrompt(articles.length);
 
         const userContent = buildSummarizationUserMessage(articles);
 
@@ -506,7 +538,7 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
         abortController = null;
 
         if (result.ok) {
-          send({ type: "streamEnd", fullContent: result.content });
+          send({ type: "streamEnd", fullContent: result.content, model: settings.ai.modelId });
 
           // Update tab state with summary
           if (currentTabId !== null) {
@@ -515,6 +547,7 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
               role: "assistant",
               content: result.content,
               timestamp: now,
+              model: settings.ai.modelId,
             };
 
             const state = tabState.get(currentTabId);
@@ -533,7 +566,7 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
         } else {
           if (result.reason === "aborted") {
             // Retain partial content on abort
-            send({ type: "streamEnd", fullContent: result.partialContent });
+            send({ type: "streamEnd", fullContent: result.partialContent, model: settings.ai.modelId });
             if (currentTabId !== null) {
               const state = tabState.get(currentTabId);
               if (state && result.partialContent) {
@@ -544,7 +577,7 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
                     ...state.conversation,
                     messages: [
                       ...state.conversation.messages,
-                      { role: "assistant", content: result.partialContent, timestamp: now, isPartial: true },
+                      { role: "assistant", content: result.partialContent, timestamp: now, isPartial: true, model: settings.ai.modelId },
                     ],
                     updatedAt: now,
                   },
@@ -607,7 +640,7 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
         // Build context messages
         const systemPrompt = activeSkills.length > 0
           ? buildCompositePrompt({ skills: activeSkills, articles })
-          : settings.ai.systemPrompt || buildDefaultSystemPrompt();
+          : settings.ai.systemPrompt || buildDefaultSystemPrompt(articles.length);
 
         const contextMessages: ChatMessage[] = [
           { role: "system", content: systemPrompt },
@@ -682,7 +715,7 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
         abortController = null;
 
         if (result.ok) {
-          send({ type: "streamEnd", fullContent: result.content });
+          send({ type: "streamEnd", fullContent: result.content, model: settings.ai.modelId });
 
           // Record assistant message in state
           if (currentTabId !== null) {
@@ -692,6 +725,7 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
                 role: "assistant",
                 content: result.content,
                 timestamp: clock(),
+                model: settings.ai.modelId,
               };
               tabState.update(currentTabId, {
                 conversation: {
@@ -706,7 +740,7 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
         } else {
           if (result.reason === "aborted") {
             // Retain partial content on abort
-            send({ type: "streamEnd", fullContent: result.partialContent });
+            send({ type: "streamEnd", fullContent: result.partialContent, model: settings.ai.modelId });
             if (currentTabId !== null) {
               const updatedState = tabState.get(currentTabId);
               if (updatedState && result.partialContent) {
@@ -715,7 +749,7 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
                     ...updatedState.conversation,
                     messages: [
                       ...updatedState.conversation.messages,
-                      { role: "assistant", content: result.partialContent, timestamp: clock(), isPartial: true },
+                      { role: "assistant", content: result.partialContent, timestamp: clock(), isPartial: true, model: settings.ai.modelId },
                     ],
                     updatedAt: clock(),
                   },
@@ -949,11 +983,14 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
 // Helper functions
 // ---------------------------------------------------------------------------
 
-function buildDefaultSystemPrompt(): string {
+function buildDefaultSystemPrompt(articleCount: number): string {
+  const sourceGuidance = articleCount > 1
+    ? `\n\nYou have been given ${articleCount} separate web pages as context, each in its own "Page N" section below. Treat them as distinct sources: synthesize across them where relevant, but never refer to them collectively as "the article" — call them "these ${articleCount} articles" or refer to them by their individual titles.`
+    : "";
   return `You are a helpful assistant that summarizes web page content. When summarizing, produce output with three sections:
 - **Findings**: Key information and facts from the page
 - **Key Points**: The most important takeaways
-- **Action Items**: Suggested next steps or actions based on the content
+- **Action Items**: Suggested next steps or actions based on the content${sourceGuidance}
 
 Format your response using Markdown bullet lists.`;
 }

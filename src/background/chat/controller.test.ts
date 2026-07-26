@@ -1009,6 +1009,453 @@ describe("CF-3.3 retry accounting — controller is the single source of truth",
   });
 });
 
+describe("SF-1 / CF-3.2 summarize includes every context tab's content", () => {
+  it("includes all three articles in the summarize request, not just the primary tab", async () => {
+    const articlesByTab: Record<number, { title: string; bodyMarkdown: string; sourceUrl: string }> = {
+      42: { title: "Primary Article", bodyMarkdown: "Primary content.", sourceUrl: "https://example.com/primary" },
+      43: { title: "Second Article", bodyMarkdown: "Second content.", sourceUrl: "https://example.com/second" },
+      44: { title: "Third Article", bodyMarkdown: "Third content.", sourceUrl: "https://example.com/third" },
+    };
+
+    let capturedRequest: StreamChatCompletionRequest | undefined;
+    const { controller, port, extractContent } = setup({
+      onStreamCall: (req) => {
+        capturedRequest = req;
+      },
+    });
+
+    extractContent.mockImplementation(async (tabId: number) => {
+      const a = articlesByTab[tabId];
+      return {
+        ok: true,
+        article: {
+          title: a.title,
+          author: null,
+          publicationDate: null,
+          sourceUrl: a.sourceUrl,
+          siteName: "",
+          bodyMarkdown: a.bodyMarkdown,
+          bodyCharacterCount: a.bodyMarkdown.length,
+        },
+        confidence: "high",
+      };
+    });
+
+    controller.handleConnect(port);
+    const listener = port.messageListeners[0];
+
+    listener({ type: "init", tabId: 42 });
+    await vi.waitFor(() => {
+      expect(port.messages.some((m) => m.type === "contextLoaded")).toBe(true);
+    });
+
+    listener({ type: "addContextTab", tabId: 43 });
+    await vi.waitFor(() => {
+      expect(port.messages.filter((m) => m.type === "contextTabAdded")).toHaveLength(1);
+    });
+
+    listener({ type: "addContextTab", tabId: 44 });
+    await vi.waitFor(() => {
+      expect(port.messages.filter((m) => m.type === "contextTabAdded")).toHaveLength(2);
+    });
+
+    listener({ type: "summarize" });
+    await vi.waitFor(() => {
+      expect(port.messages.some((m) => m.type === "streamEnd")).toBe(true);
+    });
+
+    expect(capturedRequest).toBeDefined();
+    const userMessage = capturedRequest!.messages.find((m) => m.role === "user")!;
+    expect(userMessage.content).toContain("Primary content.");
+    expect(userMessage.content).toContain("Second content.");
+    expect(userMessage.content).toContain("Third content.");
+    expect(userMessage.content).toContain("Primary Article");
+    expect(userMessage.content).toContain("Second Article");
+    expect(userMessage.content).toContain("Third Article");
+  });
+
+  it("tells the model explicitly it has multiple separate sources, not just one page", async () => {
+    let capturedRequest: StreamChatCompletionRequest | undefined;
+    const { controller, port } = setup({
+      settings: createMockSettings({ systemPrompt: "" }),
+      onStreamCall: (req) => {
+        capturedRequest = req;
+      },
+    });
+
+    controller.handleConnect(port);
+    const listener = port.messageListeners[0];
+
+    listener({ type: "init", tabId: 42 });
+    await vi.waitFor(() => {
+      expect(port.messages.some((m) => m.type === "contextLoaded")).toBe(true);
+    });
+    listener({ type: "addContextTab", tabId: 43 });
+    await vi.waitFor(() => {
+      expect(port.messages.filter((m) => m.type === "contextTabAdded")).toHaveLength(1);
+    });
+    listener({ type: "addContextTab", tabId: 44 });
+    await vi.waitFor(() => {
+      expect(port.messages.filter((m) => m.type === "contextTabAdded")).toHaveLength(2);
+    });
+
+    listener({ type: "summarize" });
+    await vi.waitFor(() => {
+      expect(port.messages.some((m) => m.type === "streamEnd")).toBe(true);
+    });
+
+    const systemMessage = capturedRequest!.messages.find((m) => m.role === "system")!;
+    expect(systemMessage.content).toContain("3 separate web pages");
+    expect(systemMessage.content).toContain('never refer to them collectively as "the article"');
+  });
+
+  it("does not add multi-source guidance to the default system prompt for a single article", async () => {
+    let capturedRequest: StreamChatCompletionRequest | undefined;
+    const { controller, port } = setup({
+      settings: createMockSettings({ systemPrompt: "" }),
+      onStreamCall: (req) => {
+        capturedRequest = req;
+      },
+    });
+
+    controller.handleConnect(port);
+    const listener = port.messageListeners[0];
+    listener({ type: "init", tabId: 42 });
+    await vi.waitFor(() => {
+      expect(port.messages.some((m) => m.type === "contextLoaded")).toBe(true);
+    });
+
+    listener({ type: "summarize" });
+    await vi.waitFor(() => {
+      expect(port.messages.some((m) => m.type === "streamEnd")).toBe(true);
+    });
+
+    const systemMessage = capturedRequest!.messages.find((m) => m.role === "system")!;
+    expect(systemMessage.content).not.toContain("separate web pages");
+  });
+
+  it("keeps all three articles available for a follow-up asked immediately after summarize (no reconnect at all)", async () => {
+    const articlesByTab: Record<number, { title: string; bodyMarkdown: string; sourceUrl: string }> = {
+      42: { title: "Primary Article", bodyMarkdown: "Primary content.", sourceUrl: "https://example.com/primary" },
+      43: { title: "Second Article", bodyMarkdown: "Second content.", sourceUrl: "https://example.com/second" },
+      44: { title: "Third Article", bodyMarkdown: "Third content.", sourceUrl: "https://example.com/third" },
+    };
+
+    let capturedRequest: StreamChatCompletionRequest | undefined;
+    const { controller, port, extractContent } = setup({
+      onStreamCall: (req) => {
+        capturedRequest = req;
+      },
+    });
+
+    extractContent.mockImplementation(async (tabId: number) => {
+      const a = articlesByTab[tabId];
+      return {
+        ok: true,
+        article: {
+          title: a.title,
+          author: null,
+          publicationDate: null,
+          sourceUrl: a.sourceUrl,
+          siteName: "",
+          bodyMarkdown: a.bodyMarkdown,
+          bodyCharacterCount: a.bodyMarkdown.length,
+        },
+        confidence: "high",
+      };
+    });
+
+    controller.handleConnect(port);
+    const listener = port.messageListeners[0];
+
+    listener({ type: "init", tabId: 42 });
+    await vi.waitFor(() => {
+      expect(port.messages.some((m) => m.type === "contextLoaded")).toBe(true);
+    });
+    listener({ type: "addContextTab", tabId: 43 });
+    await vi.waitFor(() => {
+      expect(port.messages.filter((m) => m.type === "contextTabAdded")).toHaveLength(1);
+    });
+    listener({ type: "addContextTab", tabId: 44 });
+    await vi.waitFor(() => {
+      expect(port.messages.filter((m) => m.type === "contextTabAdded")).toHaveLength(2);
+    });
+
+    listener({ type: "summarize" });
+    await vi.waitFor(() => {
+      expect(port.messages.some((m) => m.type === "streamEnd")).toBe(true);
+    });
+
+    // No reconnect, no tab switch — straight to the follow-up.
+    listener({ type: "sendMessage", text: "What articles were cited for this summary?" });
+    await vi.waitFor(() => {
+      expect(port.messages.filter((m) => m.type === "streamEnd")).toHaveLength(2);
+    });
+
+    const userMessages = capturedRequest!.messages.filter((m) => m.role === "user");
+    const combined = userMessages.map((m) => m.content).join("\n");
+    expect(combined).toContain("Second Article");
+    expect(combined).toContain("Third Article");
+    expect(combined).toContain("https://example.com/second");
+    expect(combined).toContain("https://example.com/third");
+  });
+
+  it("keeps all three articles available for a follow-up question after a same-tab reconnect (no tab switch)", async () => {
+    const articlesByTab: Record<number, { title: string; bodyMarkdown: string; sourceUrl: string }> = {
+      42: { title: "Primary Article", bodyMarkdown: "Primary content.", sourceUrl: "https://example.com/primary" },
+      43: { title: "Second Article", bodyMarkdown: "Second content.", sourceUrl: "https://example.com/second" },
+      44: { title: "Third Article", bodyMarkdown: "Third content.", sourceUrl: "https://example.com/third" },
+    };
+
+    let capturedRequest: StreamChatCompletionRequest | undefined;
+    const { controller, port, extractContent } = setup({
+      onStreamCall: (req) => {
+        capturedRequest = req;
+      },
+    });
+
+    extractContent.mockImplementation(async (tabId: number) => {
+      const a = articlesByTab[tabId];
+      return {
+        ok: true,
+        article: {
+          title: a.title,
+          author: null,
+          publicationDate: null,
+          sourceUrl: a.sourceUrl,
+          siteName: "",
+          bodyMarkdown: a.bodyMarkdown,
+          bodyCharacterCount: a.bodyMarkdown.length,
+        },
+        confidence: "high",
+      };
+    });
+
+    controller.handleConnect(port);
+    const listener = port.messageListeners[0];
+
+    listener({ type: "init", tabId: 42 });
+    await vi.waitFor(() => {
+      expect(port.messages.some((m) => m.type === "contextLoaded")).toBe(true);
+    });
+    listener({ type: "addContextTab", tabId: 43 });
+    await vi.waitFor(() => {
+      expect(port.messages.filter((m) => m.type === "contextTabAdded")).toHaveLength(1);
+    });
+    listener({ type: "addContextTab", tabId: 44 });
+    await vi.waitFor(() => {
+      expect(port.messages.filter((m) => m.type === "contextTabAdded")).toHaveLength(2);
+    });
+
+    listener({ type: "summarize" });
+    await vi.waitFor(() => {
+      expect(port.messages.some((m) => m.type === "streamEnd")).toBe(true);
+    });
+
+    // Simulate the background page idle-unloading and the sidebar's
+    // reconnect-replay re-initializing the SAME tab (no tab switch at all —
+    // this is the CF-3.6 resync path, distinct from an SF-1 tab switch).
+    listener({ type: "init", tabId: 42 });
+    await vi.waitFor(() => {
+      expect(port.messages.filter((m) => m.type === "conversationRestored")).toHaveLength(1);
+    });
+
+    listener({ type: "sendMessage", text: "What articles were cited for this summary?" });
+    await vi.waitFor(() => {
+      expect(port.messages.filter((m) => m.type === "streamEnd")).toHaveLength(2);
+    });
+
+    const userMessages = capturedRequest!.messages.filter((m) => m.role === "user");
+    const combined = userMessages.map((m) => m.content).join("\n");
+    expect(combined).toContain("Second Article");
+    expect(combined).toContain("Third Article");
+  });
+
+  it("keeps both added tabs available in persona-chat mode after a same-tab reconnect", async () => {
+    const articlesByTab: Record<number, { title: string; bodyMarkdown: string; sourceUrl: string }> = {
+      43: { title: "Second Article", bodyMarkdown: "Second content.", sourceUrl: "https://example.com/second" },
+      44: { title: "Third Article", bodyMarkdown: "Third content.", sourceUrl: "https://example.com/third" },
+    };
+
+    let capturedRequest: StreamChatCompletionRequest | undefined;
+    const { controller, port, extractContent } = setup({
+      onStreamCall: (req) => {
+        capturedRequest = req;
+      },
+    });
+
+    extractContent.mockImplementation(async (tabId: number) => {
+      const a = articlesByTab[tabId];
+      return {
+        ok: true,
+        article: {
+          title: a.title,
+          author: null,
+          publicationDate: null,
+          sourceUrl: a.sourceUrl,
+          siteName: "",
+          bodyMarkdown: a.bodyMarkdown,
+          bodyCharacterCount: a.bodyMarkdown.length,
+        },
+        confidence: "high",
+      };
+    });
+
+    controller.handleConnect(port);
+    const listener = port.messageListeners[0];
+
+    listener({ type: "init", tabId: 9, url: "about:blank" });
+    await vi.waitFor(() => {
+      expect(port.messages.some((m) => m.type === "personaModeReady")).toBe(true);
+    });
+
+    listener({ type: "addContextTab", tabId: 43 });
+    await vi.waitFor(() => {
+      expect(port.messages.filter((m) => m.type === "contextTabAdded")).toHaveLength(1);
+    });
+    listener({ type: "addContextTab", tabId: 44 });
+    await vi.waitFor(() => {
+      expect(port.messages.filter((m) => m.type === "contextTabAdded")).toHaveLength(2);
+    });
+
+    listener({ type: "summarize" });
+    await vi.waitFor(() => {
+      expect(port.messages.some((m) => m.type === "streamEnd")).toBe(true);
+    });
+
+    // Same-tab reconnect — no tab switch, just a resync of persona-chat.
+    listener({ type: "init", tabId: 9, url: "about:blank" });
+    await vi.waitFor(() => {
+      expect(port.messages.filter((m) => m.type === "personaModeReady")).toHaveLength(2);
+    });
+    // Both previously-added tabs are restored, not just wiped.
+    await vi.waitFor(() => {
+      expect(port.messages.filter((m) => m.type === "contextTabAdded")).toHaveLength(4);
+    });
+
+    listener({ type: "sendMessage", text: "What were the sources?" });
+    await vi.waitFor(() => {
+      expect(port.messages.filter((m) => m.type === "streamEnd")).toHaveLength(2);
+    });
+
+    const userMessages = capturedRequest!.messages.filter((m) => m.role === "user");
+    const combined = userMessages.map((m) => m.content).join("\n");
+    expect(combined).toContain("Second Article");
+    expect(combined).toContain("Third Article");
+  });
+});
+
+describe("CF-2.8 model attribution", () => {
+  it("includes the model on streamEnd for a summarize response", async () => {
+    const { controller, port } = setup();
+    controller.handleConnect(port);
+    const listener = port.messageListeners[0];
+    listener({ type: "init", tabId: 42 });
+    await vi.waitFor(() => {
+      expect(port.messages.some((m) => m.type === "contextLoaded")).toBe(true);
+    });
+
+    listener({ type: "summarize" });
+    await vi.waitFor(() => {
+      expect(port.messages.some((m) => m.type === "streamEnd")).toBe(true);
+    });
+
+    const streamEnd = port.messages.find((m) => m.type === "streamEnd") as { model?: string };
+    expect(streamEnd.model).toBe("gpt-4");
+  });
+
+  it("persists the model on the stored assistant message so it survives a reconnect", async () => {
+    const { controller, port } = setup();
+    controller.handleConnect(port);
+    const listener = port.messageListeners[0];
+    listener({ type: "init", tabId: 42 });
+    await vi.waitFor(() => {
+      expect(port.messages.some((m) => m.type === "contextLoaded")).toBe(true);
+    });
+    listener({ type: "summarize" });
+    await vi.waitFor(() => {
+      expect(port.messages.some((m) => m.type === "streamEnd")).toBe(true);
+    });
+
+    // Reconnect on the same tab (resync) — the restored message should carry the model.
+    listener({ type: "init", tabId: 42 });
+    await vi.waitFor(() => {
+      expect(port.messages.filter((m) => m.type === "conversationRestored")).toHaveLength(1);
+    });
+
+    const restored = port.messages.find((m) => m.type === "conversationRestored") as unknown as {
+      messages: ReadonlyArray<{ model?: string }>;
+    };
+    expect(restored.messages[0].model).toBe("gpt-4");
+  });
+
+  it("includes the model on streamEnd for a Q&A follow-up", async () => {
+    const { controller, port } = setup();
+    controller.handleConnect(port);
+    const listener = port.messageListeners[0];
+    listener({ type: "init", tabId: 42 });
+    await vi.waitFor(() => {
+      expect(port.messages.some((m) => m.type === "contextLoaded")).toBe(true);
+    });
+    listener({ type: "summarize" });
+    await vi.waitFor(() => {
+      expect(port.messages.some((m) => m.type === "streamEnd")).toBe(true);
+    });
+
+    listener({ type: "sendMessage", text: "What about X?" });
+    await vi.waitFor(() => {
+      expect(port.messages.filter((m) => m.type === "streamEnd")).toHaveLength(2);
+    });
+
+    const streamEnds = port.messages.filter((m) => m.type === "streamEnd") as Array<{ model?: string }>;
+    expect(streamEnds[1].model).toBe("gpt-4");
+  });
+
+  it("includes the model on a retried Q&A message that succeeds", async () => {
+    const requests: StreamChatCompletionRequest[] = [];
+    let callCount = 0;
+    const mockClient: StreamingAiClient = {
+      streamChatCompletion: vi.fn(async (req: StreamChatCompletionRequest): Promise<StreamChatCompletionResult> => {
+        requests.push(req);
+        callCount++;
+        if (callCount === 1) {
+          return { ok: false, reason: "network", detail: "fail", partialContent: "" };
+        }
+        req.onToken("ok");
+        return { ok: true, content: "ok" };
+      }),
+    };
+    const controller = createChatController({
+      getSettings: vi.fn().mockResolvedValue(createMockSettings()),
+      getSecureStore: () => createMockSecureStore(),
+      extractContent: vi.fn().mockResolvedValue(createSuccessfulExtractionResult()),
+      createStreamingClient: vi.fn().mockReturnValue(mockClient),
+      tabState: createMockTabState(),
+      skillLibrary: createMockSkillLibrary(),
+    });
+    const port = createMockPort();
+    controller.handleConnect(port);
+    const listener = port.messageListeners[0];
+    listener({ type: "init", tabId: 7 });
+    await vi.waitFor(() => {
+      expect(port.messages.some((m) => m.type === "contextLoaded")).toBe(true);
+    });
+
+    listener({ type: "sendMessage", text: "What is X?" });
+    await vi.waitFor(() => {
+      expect(port.messages.some((m) => m.type === "streamError")).toBe(true);
+    });
+
+    listener({ type: "retry" });
+    await vi.waitFor(() => {
+      expect(port.messages.some((m) => m.type === "streamEnd")).toBe(true);
+    });
+
+    const streamEnd = port.messages.find((m) => m.type === "streamEnd") as { model?: string };
+    expect(streamEnd.model).toBe("gpt-4");
+  });
+});
+
 describe("SF-1 restored sessions report cached confidence honestly", () => {
   it("passes null confidence through instead of defaulting to high", async () => {
     const { controller, port, tabState } = setup();

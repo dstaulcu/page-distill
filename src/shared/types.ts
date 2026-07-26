@@ -93,6 +93,9 @@ export interface ConversationMessage {
   readonly content: string;
   readonly timestamp: string;
   readonly isPartial?: boolean;
+  // The AI model that produced this message (assistant messages only) —
+  // the configured model ID at the time this specific request was made (CF-2.8).
+  readonly model?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -125,6 +128,16 @@ export interface TabContextEntry {
 // Tab State
 // ---------------------------------------------------------------------------
 
+// A secondary context tab (SF-1, added via "+") as persisted alongside a
+// session's own TabState — content is deliberately excluded and is lazily
+// re-extracted on demand, same as the primary tab's own cached restore.
+export interface ContextTabSnapshot {
+  readonly tabId: number;
+  readonly url: string;
+  readonly title: string;
+  readonly confidence: "high" | "medium" | "low" | null;
+}
+
 export interface TabState {
   readonly url: string;
   readonly title: string;
@@ -132,6 +145,9 @@ export interface TabState {
   readonly conversation: Conversation;
   readonly extractionConfidence: "high" | "medium" | "low" | null;
   readonly consecutiveFailures: number;
+  // Secondary context tabs (SF-1) added via "+" during this session — the
+  // primary tab itself is this TabState entry, not part of this list.
+  readonly contextTabs?: ReadonlyArray<ContextTabSnapshot>;
 }
 
 // ---------------------------------------------------------------------------

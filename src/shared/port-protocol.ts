@@ -35,7 +35,7 @@ export type ControllerToSidebarMessage =
   | { readonly type: "conversationRestored"; readonly messages: ReadonlyArray<PortConversationMessage> }
   | { readonly type: "streamStart" }
   | { readonly type: "streamToken"; readonly token: string }
-  | { readonly type: "streamEnd"; readonly fullContent: string }
+  | { readonly type: "streamEnd"; readonly fullContent: string; readonly model?: string }
   | { readonly type: "streamError"; readonly reason: string; readonly partialContent: string; readonly canRetry: boolean }
   | { readonly type: "configError"; readonly reason: string }
   | { readonly type: "autoExportStatus"; readonly status: PortAutoExportStatus | null }
@@ -70,6 +70,8 @@ export interface PortConversationMessage {
   readonly content: string;
   readonly timestamp: string;
   readonly isPartial?: boolean;
+  // The AI model that produced this message (assistant messages only) — CF-2.8.
+  readonly model?: string;
 }
 
 export interface AutoExportPortConfig {

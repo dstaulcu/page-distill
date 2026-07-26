@@ -188,6 +188,62 @@ describe("CF-2.2 createStreamingClient", () => {
       expect(body.messages).toEqual([{ role: "user", content: "Hello" }]);
     });
 
+    it("does not add an Ollama num_ctx override for a non-local, non-Ollama endpoint", async () => {
+      let capturedInit: RequestInit | undefined;
+      const mockFetch: typeof globalThis.fetch = async (_url, init) => {
+        capturedInit = init;
+        return new Response(createSSEStream(["data: [DONE]\n\n"]), { status: 200 });
+      };
+
+      const client = createStreamingClient(makeOptions({ baseUrl: "https://api.openai.com", fetch: mockFetch }));
+      await client.streamChatCompletion(makeRequest());
+
+      const body = JSON.parse(capturedInit?.body as string);
+      expect(body.options).toBeUndefined();
+    });
+
+    it("adds an Ollama num_ctx override when baseUrl is localhost", async () => {
+      let capturedInit: RequestInit | undefined;
+      const mockFetch: typeof globalThis.fetch = async (_url, init) => {
+        capturedInit = init;
+        return new Response(createSSEStream(["data: [DONE]\n\n"]), { status: 200 });
+      };
+
+      const client = createStreamingClient(makeOptions({ baseUrl: "http://localhost:11434", fetch: mockFetch }));
+      await client.streamChatCompletion(makeRequest());
+
+      const body = JSON.parse(capturedInit?.body as string);
+      expect(body.options).toEqual({ num_ctx: 8192 });
+    });
+
+    it("adds an Ollama num_ctx override when baseUrl is 127.0.0.1 regardless of port", async () => {
+      let capturedInit: RequestInit | undefined;
+      const mockFetch: typeof globalThis.fetch = async (_url, init) => {
+        capturedInit = init;
+        return new Response(createSSEStream(["data: [DONE]\n\n"]), { status: 200 });
+      };
+
+      const client = createStreamingClient(makeOptions({ baseUrl: "http://127.0.0.1:11434", fetch: mockFetch }));
+      await client.streamChatCompletion(makeRequest());
+
+      const body = JSON.parse(capturedInit?.body as string);
+      expect(body.options).toEqual({ num_ctx: 8192 });
+    });
+
+    it("adds an Ollama num_ctx override for a non-localhost host on Ollama's default port 11434", async () => {
+      let capturedInit: RequestInit | undefined;
+      const mockFetch: typeof globalThis.fetch = async (_url, init) => {
+        capturedInit = init;
+        return new Response(createSSEStream(["data: [DONE]\n\n"]), { status: 200 });
+      };
+
+      const client = createStreamingClient(makeOptions({ baseUrl: "http://ollama.internal.lan:11434", fetch: mockFetch }));
+      await client.streamChatCompletion(makeRequest());
+
+      const body = JSON.parse(capturedInit?.body as string);
+      expect(body.options).toEqual({ num_ctx: 8192 });
+    });
+
     it("clears its per-read timeout timers once the stream completes (no leaked timers)", async () => {
       vi.useFakeTimers();
       try {

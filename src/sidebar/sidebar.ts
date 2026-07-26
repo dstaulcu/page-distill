@@ -59,6 +59,18 @@ let autoExportStatus: PortAutoExportStatus | null = null;
 let port: ReturnType<typeof browser.runtime.connect> | null = null;
 let tracker: ActiveTabTracker | null = null;
 let currentTabId: number | null = null;
+// The URL belonging to currentTabId specifically — NOT tracker.getActiveTabUrl(),
+// which reports whatever tab currently has browser focus. Those diverge when a
+// tab switch is skipped as a context-tab no-op (SF-1), so a reconnect replay
+// must use this, or it can pair the wrong tab with the wrong URL and cause the
+// background to wrongly treat currentTabId as having navigated away.
+let currentTabUrl: string | undefined;
+// True from the moment sendToController replays an "init" to resync a
+// reconnected port (CF-3.6) until the controller answers it. The reply to
+// that replayed init must not clobber whatever the user is already doing
+// locally (e.g. a message they just hit Send on) — it's background
+// bookkeeping, not a real session start.
+let resyncInFlight = false;
 let hasSavedPattern = false; // Whether the current site has a saved selector
 let lowConfidence = false; // Whether extraction had low confidence
 let pageWordCount: number | null = null; // Word count of extracted content (for reading-time estimate)
@@ -72,6 +84,8 @@ let showHelpMenu = false;
 let contextTabs: ContextTabInfo[] = [];
 let openTabsList: { tabId: number; title: string; url: string }[] = [];
 let showTabPicker = false;
+let contextTabError: string | null = null;
+let contextTabErrorTimeout: ReturnType<typeof setTimeout> | null = null;
 
 // ─── Skill State ─────────────────────────────────────────────────────────────
 
@@ -136,15 +150,36 @@ async function writeToClipboard(content: string): Promise<boolean> {
   }
 }
 
+// Sends a message to the background controller, transparently reconnecting
+// the port first if it had gone stale (e.g. the background page was
+// idle-unloaded — CF-3.6). A disconnected port must never cause a message
+// to be silently dropped.
 function sendToController(msg: SidebarToControllerMessage): void {
-  if (port) {
-    port.postMessage(msg);
+  const wasDisconnected = !port;
+  if (wasDisconnected) {
+    connectPort();
   }
+
+  const activePort = port;
+  if (!activePort) return;
+
+  if (wasDisconnected && msg.type !== "init" && currentTabId !== null) {
+    resyncInFlight = true;
+    activePort.postMessage({ type: "init", tabId: currentTabId, url: currentTabUrl });
+  }
+  activePort.postMessage(msg);
 }
 
 function handleControllerMessage(msg: ControllerToSidebarMessage): void {
   switch (msg.type) {
     case "personaModeReady":
+      // A resync init (CF-3.6 reconnect replay) answering while the user is
+      // already mid-send must not clobber their in-flight conversation.
+      if (resyncInFlight) {
+        resyncInFlight = false;
+        render();
+        break;
+      }
       // about:blank or similar — enter persona chat mode with no page context
       contextTabs = [];
       state = { phase: "persona-chat", messages: msg.messages ? [...msg.messages] : [] };
@@ -153,6 +188,13 @@ function handleControllerMessage(msg: ControllerToSidebarMessage): void {
       break;
 
     case "contextLoaded":
+      if (resyncInFlight) {
+        resyncInFlight = false;
+        hasSavedPattern = msg.hasSavedPattern;
+        pageWordCount = msg.wordCount;
+        render();
+        break;
+      }
       // Content extracted — go to ready state (user can click Summarize)
       contextTabs = [{ tabId: currentTabId!, url: msg.url, title: msg.title, confidence: msg.confidence }];
       state = { phase: "ready", messages: [] };
@@ -179,8 +221,18 @@ function handleControllerMessage(msg: ControllerToSidebarMessage): void {
       break;
 
     case "contextTabFailed":
-      // Tab extraction failed — close picker but don't add to context
+      // Tab extraction failed — close picker, don't add to context, and
+      // surface the reason (SF-1) instead of failing silently.
       showTabPicker = false;
+      contextTabError = msg.reason;
+      if (contextTabErrorTimeout) {
+        clearTimeout(contextTabErrorTimeout);
+      }
+      contextTabErrorTimeout = setTimeout(() => {
+        contextTabError = null;
+        contextTabErrorTimeout = null;
+        render();
+      }, 5000);
       render();
       break;
 
@@ -196,6 +248,11 @@ function handleControllerMessage(msg: ControllerToSidebarMessage): void {
       break;
 
     case "contextError":
+      if (resyncInFlight) {
+        resyncInFlight = false;
+        render();
+        break;
+      }
       // If the error is about page type (about:, moz-extension:, etc.), show a
       // friendly "no page" state instead of a scary error
       if (msg.reason.includes("Cannot extract content from this page type") ||
@@ -215,6 +272,11 @@ function handleControllerMessage(msg: ControllerToSidebarMessage): void {
       break;
 
     case "conversationRestored":
+      if (resyncInFlight) {
+        resyncInFlight = false;
+        render();
+        break;
+      }
       state = { phase: "ready", messages: msg.messages };
       render();
       break;
@@ -265,6 +327,7 @@ function handleControllerMessage(msg: ControllerToSidebarMessage): void {
         role: "assistant",
         content: msg.fullContent,
         timestamp: new Date().toISOString(),
+        model: msg.model,
       };
       if (state.phase === "summarizing") {
         const newMessages = hasContent ? [endMsg] : [];
@@ -308,6 +371,12 @@ function handleControllerMessage(msg: ControllerToSidebarMessage): void {
     }
 
     case "configError":
+      if (resyncInFlight) {
+        resyncInFlight = false;
+        configWarning = msg.reason;
+        render();
+        break;
+      }
       if (state.phase === "ready" || state.phase === "summarizing" || state.phase === "persona-chat") {
         configWarning = msg.reason;
         // summarizing can't stay mid-stream without AI; drop back to the
@@ -770,6 +839,12 @@ function renderContextSection(): HTMLElement {
     strip.appendChild(picker);
   }
 
+  if (contextTabError) {
+    const errorEl = el("div", "context-tab-error");
+    errorEl.textContent = contextTabError;
+    strip.appendChild(errorEl);
+  }
+
   return strip;
 }
 
@@ -817,6 +892,13 @@ function renderMessages(messages: ReadonlyArray<PortConversationMessage>, partia
     const roleLabel = el("span", "message-role");
     roleLabel.textContent = msg.role === "user" ? "You" : "Distill";
     msgEl.appendChild(roleLabel);
+
+    if (msg.role === "assistant" && msg.model) {
+      const modelLabel = el("span", "message-model");
+      modelLabel.textContent = msg.model;
+      msgEl.appendChild(modelLabel);
+    }
+
 
     const contentEl = el("div", "message-content");
     contentEl.innerHTML = renderMarkdown(msg.content);
@@ -1419,6 +1501,11 @@ function resetLocalNav(): void {
   contextTabs = [];
   showTabPicker = false;
   pageWordCount = null;
+  contextTabError = null;
+  if (contextTabErrorTimeout) {
+    clearTimeout(contextTabErrorTimeout);
+    contextTabErrorTimeout = null;
+  }
   state = { phase: "loading" };
 }
 
@@ -1511,14 +1598,29 @@ async function init(): Promise<void> {
       render();
     } else {
       currentTabId = tabId;
-      sendToController({ type: "init", tabId, url: tracker.getActiveTabUrl() ?? undefined });
+      currentTabUrl = tracker.getActiveTabUrl() ?? undefined;
+      sendToController({ type: "init", tabId, url: currentTabUrl });
       // Also request auto-export status
       sendToController({ type: "autoExportStatusRequest", tabId });
     }
 
     // Listen for tab changes
     tracker.onActiveTabChanged((newTabId: number, newUrl: string) => {
+      // Auto-export status reflects whichever tab is physically in view,
+      // independent of whether the chat session itself resets below.
+      sendToController({ type: "autoExportStatusRequest", tabId: newTabId });
+
+      // If the newly active tab is already part of this session's multi-tab
+      // context (SF-1 — the primary tab or one added via "+"), treat the
+      // switch as a no-op for the chat session: peeking at a citation tab
+      // you already added shouldn't reset the conversation or drop the
+      // other context tabs.
+      if (contextTabs.some((t) => t.tabId === newTabId)) {
+        return;
+      }
+
       currentTabId = newTabId;
+      currentTabUrl = newUrl;
       resetLocalNav();
       render();
 
@@ -1528,7 +1630,6 @@ async function init(): Promise<void> {
       }
 
       sendToController({ type: "init", tabId: newTabId, url: newUrl });
-      sendToController({ type: "autoExportStatusRequest", tabId: newTabId });
     });
   } catch {
     state = { phase: "no-page" };

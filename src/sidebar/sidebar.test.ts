@@ -27,11 +27,24 @@ let sentRuntimeMessages: unknown[];
 let localStorageData: Record<string, unknown>;
 let syncStorageData: Record<string, unknown>;
 let runtimeSendResponse: unknown;
+let tabActivatedListeners: Array<(info: { tabId: number; windowId: number }) => void>;
+let tabUrlById: Record<number, string>;
+
+async function activateTab(tabId: number): Promise<void> {
+  for (const cb of tabActivatedListeners) cb({ tabId, windowId: 1 });
+  await flush();
+}
 
 function installBrowserMock(): void {
   portListeners = [];
   sentRuntimeMessages = [];
   runtimeSendResponse = { payload: { ok: true, filename: "x.md" } };
+  tabActivatedListeners = [];
+  tabUrlById = {
+    42: "https://example.com/article",
+    43: "https://example.com/other",
+    44: "https://example.com/third",
+  };
 
   mockPort = {
     onMessage: {
@@ -45,7 +58,14 @@ function installBrowserMock(): void {
   Object.defineProperty(globalThis, "browser", {
     value: {
       runtime: {
-        connect: vi.fn(() => mockPort),
+        // A real reconnect yields a brand-new Port; the old one never fires
+        // again. Clearing portListeners here mirrors that — otherwise the
+        // stale pre-disconnect listener stays registered on the same mock
+        // object and every subsequent emit() double-dispatches messages.
+        connect: vi.fn(() => {
+          portListeners = [];
+          return mockPort;
+        }),
         sendMessage: vi.fn(async (msg: unknown) => {
           sentRuntimeMessages.push(msg);
           return runtimeSendResponse;
@@ -67,9 +87,14 @@ function installBrowserMock(): void {
         getCurrent: vi.fn(async () => ({ id: 1 })),
       },
       tabs: {
-        query: vi.fn(async () => [{ id: 42, url: "https://example.com/article", active: true, windowId: 1 }]),
-        get: vi.fn(async () => ({ id: 42, url: "https://example.com/article", windowId: 1 })),
-        onActivated: { addListener: vi.fn(), removeListener: vi.fn() },
+        query: vi.fn(async () => [{ id: 42, url: tabUrlById[42], active: true, windowId: 1 }]),
+        get: vi.fn(async (tabId: number) => ({ id: tabId, url: tabUrlById[tabId], windowId: 1 })),
+        onActivated: {
+          addListener: vi.fn((cb: (info: { tabId: number; windowId: number }) => void) => {
+            tabActivatedListeners.push(cb);
+          }),
+          removeListener: vi.fn(),
+        },
         onUpdated: { addListener: vi.fn(), removeListener: vi.fn() },
         onRemoved: { addListener: vi.fn(), removeListener: vi.fn() },
       },
@@ -265,6 +290,42 @@ describe("CF-2.2 / CF-2.5 summarization streaming and abort", () => {
   });
 });
 
+describe("CF-2.8 model attribution", () => {
+  it("shows which model produced a freshly streamed summary", async () => {
+    await loadSidebar();
+    emit(contextLoaded);
+    (app().querySelector(".btn-summarize") as HTMLButtonElement).click();
+    emit({ type: "streamEnd", fullContent: "Summary text", model: "llama3" });
+
+    expect(app().querySelector(".message-model")?.textContent).toBe("llama3");
+  });
+
+  it("shows the model on a restored conversation's message, not just a fresh stream", async () => {
+    await loadSidebar();
+    emit(contextLoaded);
+    emit({
+      type: "conversationRestored",
+      messages: [{ role: "assistant", content: "The summary", timestamp: "t", model: "llama3" }],
+    });
+
+    expect(app().querySelector(".message-model")?.textContent).toBe("llama3");
+  });
+
+  it("does not show a model label for the user's own messages", async () => {
+    await loadSidebar();
+    emit(contextLoaded);
+    emit({
+      type: "conversationRestored",
+      messages: [
+        { role: "user", content: "Hi", timestamp: "t" },
+        { role: "assistant", content: "Hello", timestamp: "t2", model: "llama3" },
+      ],
+    });
+
+    expect(app().querySelectorAll(".message-model")).toHaveLength(1);
+  });
+});
+
 describe("SF-2 persona-chat summarize", () => {
   const otherTabAdded: ControllerToSidebarMessage = {
     type: "contextTabAdded",
@@ -305,6 +366,44 @@ describe("SF-2 persona-chat summarize", () => {
     // staying out of "ready" proves the round-trip preserved persona-chat's
     // multi-tab context semantics instead of collapsing to single-tab "ready".
     expect(app().querySelector(".btn-reset")).toBeNull();
+  });
+
+  it("keeps a previously added context tab when a resync happens mid-add (background idle-unload)", async () => {
+    await loadSidebar();
+    emit({ type: "personaModeReady", messages: [] });
+    emit(otherTabAdded);
+
+    expect(app().querySelector(".btn-summarize")).not.toBeNull();
+
+    // Background idle-unloads while the user is about to add a second tab.
+    const disconnectCb = mockPort.onDisconnect.addListener.mock.calls[0][0] as () => void;
+    disconnectCb();
+
+    // Clicking "+ Add tab" fires getOpenTabs over the stale port, which
+    // reconnects and replays init before the real request.
+    (app().querySelector(".context-chip-add") as HTMLButtonElement).click();
+
+    // The controller's reply to the replayed init — a fresh persona-chat
+    // start, since nothing has been cached yet — must not wipe the tab
+    // already added or drop back out of persona-chat.
+    emit({ type: "personaModeReady", messages: [] });
+
+    expect(app().querySelectorAll(".context-chip-remove")).toHaveLength(1);
+    expect(app().querySelector(".btn-summarize")).not.toBeNull();
+
+    // The real getOpenTabs response still arrives and adding a second tab
+    // still works normally afterward.
+    emit({ type: "openTabs", tabs: [{ tabId: 100, title: "Third Article", url: "https://example.com/third" }] });
+    (app().querySelector(".tab-picker-item") as HTMLButtonElement).click();
+    emit({
+      type: "contextTabAdded",
+      tabId: 100,
+      url: "https://example.com/third",
+      title: "Third Article",
+      confidence: "high",
+    });
+
+    expect(app().querySelectorAll(".context-chip-remove")).toHaveLength(2);
   });
 });
 
@@ -425,5 +524,174 @@ describe("CF-6.3 element-picker recovery hint", () => {
     emit({ type: "contextTabAdded", tabId: 99, url: "https://example.com/other", title: "Other thin page", confidence: "low" });
 
     expect(app().querySelector(".picker-link")).toBeNull();
+  });
+});
+
+describe("SF-1 context tab add failures", () => {
+  it("surfaces the failure reason instead of silently closing the picker", async () => {
+    await loadSidebar();
+    emit(contextLoaded);
+    emit({ type: "openTabs", tabs: [{ tabId: 99, title: "Other Article", url: "https://example.com/other" }] });
+
+    (app().querySelector(".tab-picker-item") as HTMLButtonElement).click();
+    expect(mockPort.postMessage).toHaveBeenCalledWith({ type: "addContextTab", tabId: 99 });
+
+    emit({
+      type: "contextTabFailed",
+      tabId: 99,
+      url: "https://example.com/other",
+      title: "Other Article",
+      reason: "Content script did not respond within 10s",
+    });
+
+    expect(app().textContent).toContain("Content script did not respond within 10s");
+    // Only the primary tab has a chip — the failed tab never becomes one
+    expect(app().querySelectorAll(".context-chip-remove")).toHaveLength(1);
+  });
+
+  it("clears the failure message on its own after a timeout", async () => {
+    await loadSidebar();
+    vi.useFakeTimers();
+    try {
+      emit(contextLoaded);
+      emit({
+        type: "contextTabFailed",
+        tabId: 99,
+        url: "https://example.com/other",
+        title: "Other Article",
+        reason: "Tab not accessible",
+      });
+      expect(app().textContent).toContain("Tab not accessible");
+
+      vi.runAllTimers();
+
+      expect(app().textContent).not.toContain("Tab not accessible");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("CF-3.6 reconnect before send", () => {
+  async function reachReadyWithHistory(): Promise<void> {
+    await loadSidebar();
+    emit(contextLoaded);
+    emit({ type: "conversationRestored", messages: [{ role: "assistant", content: "The summary", timestamp: "t" }] });
+  }
+
+  it("reconnects and replays init before delivering a message sent after the port disconnected", async () => {
+    await reachReadyWithHistory();
+
+    // Simulate the background page idle-unloading: the port disconnects.
+    const disconnectCb = mockPort.onDisconnect.addListener.mock.calls[0][0] as () => void;
+    disconnectCb();
+
+    const callsBeforeSend = mockPort.postMessage.mock.calls.length;
+
+    const textarea = app().querySelector(".message-input") as HTMLTextAreaElement;
+    textarea.value = "Are you still there?";
+    (app().querySelector(".btn-send") as HTMLButtonElement).click();
+
+    expect(browser.runtime.connect).toHaveBeenCalledTimes(2);
+
+    const newCalls = mockPort.postMessage.mock.calls.slice(callsBeforeSend);
+    expect(newCalls[0][0]).toEqual(expect.objectContaining({ type: "init", tabId: 42 }));
+    expect(newCalls[1][0]).toEqual(expect.objectContaining({ type: "sendMessage", text: "Are you still there?" }));
+  });
+
+  it("does not discard the in-flight message when the replayed init's response arrives", async () => {
+    await reachReadyWithHistory();
+
+    const disconnectCb = mockPort.onDisconnect.addListener.mock.calls[0][0] as () => void;
+    disconnectCb();
+
+    const textarea = app().querySelector(".message-input") as HTMLTextAreaElement;
+    textarea.value = "Are you still there?";
+    (app().querySelector(".btn-send") as HTMLButtonElement).click();
+
+    // The controller answers the replayed init before the real answer streams.
+    emit({ type: "conversationRestored", messages: [{ role: "assistant", content: "The summary", timestamp: "t" }] });
+
+    // The in-flight question must still be visible — not wiped by the resync.
+    expect(app().textContent).toContain("Are you still there?");
+
+    // The real answer still streams in normally afterward.
+    emit({ type: "streamStart" });
+    emit({ type: "streamToken", token: "Yes, still here." });
+    emit({ type: "streamEnd", fullContent: "Yes, still here." });
+
+    expect(app().textContent).toContain("Yes, still here.");
+    expect(app().textContent).toContain("Are you still there?");
+  });
+});
+
+describe("SF-1 switching to a tab already in context does not reset the session", () => {
+  const otherTabAdded: ControllerToSidebarMessage = {
+    type: "contextTabAdded",
+    tabId: 43,
+    url: "https://example.com/other",
+    title: "Other Article",
+    confidence: "high",
+  };
+
+  it("ignores an active-tab switch to a tab that's already part of the multi-tab context", async () => {
+    await loadSidebar();
+    emit(contextLoaded);
+    emit(otherTabAdded);
+    emit({ type: "conversationRestored", messages: [{ role: "assistant", content: "The summary", timestamp: "t" }] });
+
+    const callsBefore = mockPort.postMessage.mock.calls.length;
+
+    // Switch the browser's active tab to tab 43 — already a context chip.
+    await activateTab(43);
+
+    // Auto-export status still refreshes for the tab now in view, but the
+    // chat session itself does not reset — no "init" is sent for the switch.
+    const newCalls = mockPort.postMessage.mock.calls.slice(callsBefore).map(([m]) => m as { type: string; tabId?: number });
+    expect(newCalls).toEqual([{ type: "autoExportStatusRequest", tabId: 43 }]);
+
+    // Conversation and both chips are still intact.
+    expect(app().textContent).toContain("The summary");
+    expect(app().querySelectorAll(".context-chip-remove")).toHaveLength(2);
+  });
+
+  it("replays init with tab 42's own URL, not the peeked-at tab's URL, after a port drop", async () => {
+    await loadSidebar();
+    emit(contextLoaded); // primary tab 42, url https://example.com/article
+    emit(otherTabAdded); // tab 43, url https://example.com/other
+    emit({ type: "conversationRestored", messages: [{ role: "assistant", content: "The summary", timestamp: "t" }] });
+
+    // Peek at tab 43 (already in context) — the chat session stays on tab 42.
+    await activateTab(43);
+
+    // The background page idle-unloads: the port disconnects.
+    const disconnectCb = mockPort.onDisconnect.addListener.mock.calls[0][0] as () => void;
+    disconnectCb();
+
+    const callsBeforeSend = mockPort.postMessage.mock.calls.length;
+
+    const textarea = app().querySelector(".message-input") as HTMLTextAreaElement;
+    textarea.value = "Are you still there?";
+    (app().querySelector(".btn-send") as HTMLButtonElement).click();
+
+    const newCalls = mockPort.postMessage.mock.calls.slice(callsBeforeSend);
+    const initCall = newCalls.find(([m]) => (m as { type: string }).type === "init")![0] as { tabId: number; url?: string };
+    expect(initCall.tabId).toBe(42);
+    expect(initCall.url).toBe("https://example.com/article");
+  });
+
+  it("still resets when switching to a tab that is not part of the current context", async () => {
+    await loadSidebar();
+    emit(contextLoaded);
+    emit(otherTabAdded);
+    emit({ type: "conversationRestored", messages: [{ role: "assistant", content: "The summary", timestamp: "t" }] });
+
+    const callsBefore = mockPort.postMessage.mock.calls.length;
+
+    // Switch to tab 44 — a genuinely different, untracked tab.
+    await activateTab(44);
+
+    const newCalls = mockPort.postMessage.mock.calls.slice(callsBefore);
+    expect(newCalls.some(([m]) => (m as { type: string }).type === "init" && (m as { tabId: number }).tabId === 44)).toBe(true);
   });
 });

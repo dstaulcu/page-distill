@@ -48,10 +48,37 @@ export interface StreamingClientOptions {
 
 const DEFAULT_TOKEN_TIMEOUT_MS = 30_000;
 
+// Ollama defaults every request to a 2048-token context window regardless of
+// what the model itself supports, unless the request explicitly overrides
+// it — silently truncating long multi-article conversations from the front
+// (dropping the earliest content: system prompt, page context, article
+// titles/URLs) once the total exceeds that. 8192 matches llama3's native
+// context and is a reasonable default for typical local models.
+const OLLAMA_DEFAULT_NUM_CTX = 8192;
+
+/**
+ * Heuristic for "this endpoint is probably a local Ollama server" — matched
+ * on loopback hosts or Ollama's default port, since arbitrary cloud
+ * OpenAI-compatible APIs may reject an unrecognized top-level `options`
+ * field and must never receive it.
+ */
+export function isOllamaLikeEndpoint(baseUrl: string): boolean {
+  try {
+    const url = new URL(baseUrl);
+    if (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1" || url.hostname === "0.0.0.0") {
+      return true;
+    }
+    return url.port === "11434";
+  } catch {
+    return false;
+  }
+}
+
 export function createStreamingClient(opts: StreamingClientOptions): StreamingAiClient {
   const fetchFn = opts.fetch ?? globalThis.fetch;
   const tokenTimeoutMs = opts.tokenTimeoutMs ?? DEFAULT_TOKEN_TIMEOUT_MS;
   const endpoint = opts.baseUrl.replace(/\/+$/, "") + "/v1/chat/completions";
+  const ollamaLike = isOllamaLikeEndpoint(opts.baseUrl);
 
   return {
     async streamChatCompletion(req: StreamChatCompletionRequest): Promise<StreamChatCompletionResult> {
@@ -72,16 +99,21 @@ export function createStreamingClient(opts: StreamingClientOptions): StreamingAi
         headers.Authorization = `Bearer ${opts.apiKey}`;
       }
 
+      const body: Record<string, unknown> = {
+        model: req.model,
+        messages: req.messages,
+        stream: true,
+      };
+      if (ollamaLike) {
+        body.options = { num_ctx: OLLAMA_DEFAULT_NUM_CTX };
+      }
+
       let response: Response;
       try {
         response = await fetchFn(endpoint, {
           method: "POST",
           headers,
-          body: JSON.stringify({
-            model: req.model,
-            messages: req.messages,
-            stream: true,
-          }),
+          body: JSON.stringify(body),
           signal: req.signal,
         });
       } catch (err: unknown) {

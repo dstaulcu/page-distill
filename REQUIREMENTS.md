@@ -85,6 +85,11 @@ These must never break. Criteria are stated as observable behavior.
   Summarize/Q&A fail gracefully with a config error rather than a network error.
 - **2.7** If no token arrives for **30 seconds** mid-stream, the request fails with a
   timeout error that carries the partial content received so far.
+- **2.8** Each assistant message (summary or Q&A reply) records which AI model produced it —
+  the configured model ID at the time that specific request was made — and the sidebar
+  displays it alongside the message's role label. This applies to summarization and Q&A
+  alike, and to partial content retained from an abort; a retried message reflects whichever
+  model actually produced the successful attempt.
 
 ### CF-3 Q&A chat
 
@@ -105,6 +110,20 @@ These must never break. Criteria are stated as observable behavior.
 - **3.5** Chat content rendered to HTML (messages, streaming partials) is sanitized: HTML
   special characters **including quotes** are escaped, and links render only with `http:` /
   `https:` schemes — `javascript:` URLs and attribute injection must not execute.
+- **3.6** Before sending any message to the controller, the sidebar checks whether its port is
+  connected; if not (e.g. the background page was idle-unloaded), it reconnects and replays
+  `init` for the current tab before delivering the pending message — a disconnected port must
+  never cause a message to be silently dropped. (Scope note: this covers reconnect-and-replay;
+  it relies on the existing streamError/configError paths to surface any failure *after*
+  reconnection succeeds. The case where `browser.runtime.connect` itself cannot re-establish a
+  port at all — e.g. the extension was reloaded/uninstalled mid-session — is not separately
+  guarded or tested here.)
+- **3.7** The controller's reply to a reconnect-replayed `init` (CF-3.6) must never overwrite
+  local session state — whether that reply lands mid-send of a chat message or mid-action on
+  anything else the sidebar sent while the port was disconnected (e.g. requesting the tab
+  picker, adding a context tab). Any such reply is treated as background resync only
+  (housekeeping fields may still update) and the current conversation, its messages, and the
+  context-tab set are left untouched.
 
 ### CF-4 Markdown export
 
@@ -151,6 +170,13 @@ These must never break. Criteria are stated as observable behavior.
   keyless endpoints (Ollama) working.
 - **5.4** The options page Test Connection button sends a minimal chat-completion request to
   the configured endpoint and reports success/failure inline within 10 s.
+- **5.5** When the configured AI base URL looks like a local Ollama endpoint (loopback host,
+  or Ollama's default port 11434), every chat-completion request includes an explicit
+  `options.num_ctx` override (8192) — Ollama otherwise silently defaults every request to a
+  2048-token context window regardless of what the model supports, truncating long
+  multi-article conversations from the front (dropping page content and article
+  titles/URLs first) without any visible error. Non-Ollama-like endpoints never receive this
+  field, since a strict OpenAI-compatible cloud API may reject an unrecognized top-level key.
 
 ### CF-6 Site patterns & element picker
 
@@ -185,6 +211,25 @@ Convenience features; regressions matter but are not release-blocking.
   includes it in subsequent prompts; failures surface per-tab without blocking others;
   chips can be dismissed to remove a tab from context. Multi-article prompts render one
   titled subsection per article.
+- When adding a tab fails (`contextTabFailed`), the sidebar shows the failure reason to the
+  user as a transient, auto-clearing message — it must never fail silently with the picker
+  simply closing and no visible feedback.
+- When more than one article is in context and no custom system prompt or skill overrides it,
+  the default system prompt explicitly tells the model it has received N separate sources and
+  must not refer to them collectively as "the article" — this only applies to the built-in
+  default prompt; a user-supplied custom system prompt or an active skill's prompt is used
+  verbatim and is not rewritten.
+- Switching the browser's active tab to one that is already part of the current session's
+  context set (the primary tab or one added via "+") does not reset the conversation or the
+  context-tab set — this is a no-op for session purposes. Switching to a tab that is **not**
+  part of the current context still resets and re-initializes as before (CF-3.4).
+- The set of secondary context tabs (added via "+") is persisted alongside a session's own
+  cached state, not just held in memory for the current port connection. Any reconnect —
+  whether triggered by a tab switch away and back, or by the background page having idle-
+  unloaded on the same tab — restores the **full** context-tab set, not just the primary tab.
+  Restored secondary tabs have their content lazily re-extracted on demand, same as the primary
+  tab's own cached restore; if a previously-added tab no longer exists, it is simply omitted
+  rather than blocking the rest.
 
 ### SF-2 Persona-chat mode
 
