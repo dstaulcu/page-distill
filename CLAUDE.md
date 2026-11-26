@@ -22,6 +22,7 @@ Non-negotiable rules for every change:
    `describe("CF-4.2 renderFrontmatter", …)`) — that is what makes the regression filter work.
 6. Don't silently change observable behavior; if a fix changes something users may rely on,
    flag it. Report test results honestly, including failures.
+7. **Every user-visible change gets a `CHANGELOG.md` entry** under `## [Unreleased]` (Added / Changed / Fixed / Removed), written for users, not developers. `npm run release` refuses to run with none, moves the entries under the new version, and writes the release notes.
 
 ## Commands
 
@@ -45,6 +46,10 @@ npx vitest run prop.test
 # restored so a failed release never leaves a half-bumped tree.
 npm run release -- patch            # 3.0.0 → 3.0.1 (also: minor, major, or an explicit x.y.z)
 npm run release -- patch --skip-checks   # skip typecheck + tests — not for real releases
+# The release also needs entries under "Unreleased" in CHANGELOG.md; it promotes them to the new
+# version, and writes web-ext-artifacts/release-notes-<version>.md (entries + install steps + a link
+# to the changelog). Publish with the `gh release create …` command it prints, so the GitHub
+# release always links to the changelog. (--skip-changelog bypasses this — not recommended.)
 ```
 
 Load in Firefox: `about:debugging#/runtime/this-firefox` → "Load Temporary Add-on" → select `dist/manifest.json`.
@@ -128,6 +133,7 @@ All external deps (browser APIs, fetch, crypto) are injected. The suite must pas
 
 ## Reference
 
+- `CHANGELOG.md` — what changed in each release (Keep a Changelog format); linked from every GitHub release
 - `README.md` — short user-facing docs (install, setup, privacy); architecture notes live here, not in the README
 - `scripts/release.mjs` — version bump + build + packaging (`npm run release`); produces the
   unsigned `.xpi` artifacts in `web-ext-artifacts/` (git-ignored)

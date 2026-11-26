@@ -64,7 +64,8 @@ npm run typecheck    # type check
 npm run release -- patch   # bump version, test, build, zip to web-ext-artifacts/
 ```
 
-Architecture notes, conventions and testing rules are in [CLAUDE.md](CLAUDE.md).
+Architecture notes, conventions and testing rules are in [CLAUDE.md](CLAUDE.md). What changed in
+each release is in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
