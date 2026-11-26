@@ -68,16 +68,20 @@ export function createExtractionService(deps: ExtractionServiceDeps): Extraction
         return { ok: false, reason: "extraction-error", detail: "Tab not accessible" };
       }
 
-      // If no explicit selector provided, look up saved site patterns for this URL
+      // If no explicit selector provided, look up saved site patterns for this URL.
+      // A selector that came from the built-in list (or no selector at all) is
+      // "automatic"; one the user saved or passed explicitly must be respected.
+      let autoSelect = !selector;
       if (!selector) {
         const settings = await deps.getSettings();
         const match = matchSitePattern({ patterns: settings.sitePatterns, url: tabUrl });
         if (match.ok) {
           selector = match.pattern.contentSelector;
+          autoSelect = match.pattern.source === "builtin";
         }
       }
 
-      const msg = buildMessage("extractRequested", { tabId, selector });
+      const msg = buildMessage("extractRequested", { tabId, selector, autoSelect });
 
       let response: unknown;
       try {

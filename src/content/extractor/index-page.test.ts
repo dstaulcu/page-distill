@@ -58,3 +58,37 @@ describe("CF-1 buildHeadlineIndex", () => {
     expect(d.querySelector("nav")).not.toBeNull();
   });
 });
+
+describe("CF-1 buildHeadlineIndex: link handling and sections", () => {
+  const base = "https://news.example.com/";
+
+  it("percent-encodes parentheses so a headline URL can't end the markdown link early", () => {
+    const html = headlines(12) + `<h2><a href="/wiki/Foo_(bar)">A headline whose URL has parentheses</a></h2>`;
+    const idx = buildHeadlineIndex(doc(html), base)!;
+    expect(idx.markdown).toContain("(https://news.example.com/wiki/Foo_%28bar%29)");
+    expect(idx.markdown).not.toContain("Foo_(bar)");
+  });
+
+  it("skips permalinks back to the page itself (docs pages with section anchors)", () => {
+    const anchors = Array.from({ length: 15 }, (_, i) => `<h2><a href="https://news.example.com/#section-${i}">Documentation section number ${i} heading</a></h2>`).join("");
+    expect(buildHeadlineIndex(doc(anchors + headlines(3)), base)).toBeNull();
+  });
+
+  it("keeps sections named 'Top Stories' / 'Trending' instead of stripping them as promo modules", () => {
+    const section = (title: string, tag: string, n: number, from: number) =>
+      `<section><h1>${title}</h1>` + Array.from({ length: n }, (_, i) => `<${tag}><a href="/s/${from + i}">${title} item number ${i} is here</a></${tag}>`).join("") + `</section>`;
+    const html = section("Top Stories", "h2", 8, 0) + section("Trending Stories", "h2", 8, 100) + `<p>${"filler text ".repeat(200)}</p>`;
+    const idx = buildHeadlineIndex(doc(html), base);
+    expect(idx).not.toBeNull();
+    expect(idx!.count).toBeGreaterThanOrEqual(16);
+  });
+
+  it("does not clone or strip the page when there are too few linked headings", () => {
+    const d = doc(headlines(3) + `<p>text</p>`);
+    let cloned = false;
+    const original = d.body.cloneNode.bind(d.body);
+    d.body.cloneNode = ((deep?: boolean) => { cloned = true; return original(deep); }) as typeof d.body.cloneNode;
+    expect(buildHeadlineIndex(d, base)).toBeNull();
+    expect(cloned).toBe(false);
+  });
+});

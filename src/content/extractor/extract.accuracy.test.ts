@@ -126,7 +126,7 @@ describe("CF-1 portal / homepage pages", () => {
 
   it("returns the headline list instead of one arbitrary card when the page is a portal", async () => {
     const doc = createDocument(portal(), "https://news.example.com/");
-    const result = await extract({ doc, url: "https://news.example.com/", contentSelector: GENERIC });
+    const result = await extract({ doc, url: "https://news.example.com/", contentSelector: GENERIC, autoSelect: true });
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -156,6 +156,30 @@ describe("CF-1 portal / homepage pages", () => {
     if (!result.ok) return;
     expect(result.article.bodyMarkdown).toContain("genuine story text");
     expect(result.article.bodyMarkdown).not.toContain("Rail headline");
+  });
+
+  it("respects a user's selector even when its text equals the built-in generic one", async () => {
+    const doc = createDocument(portal(), "https://news.example.com/");
+    const result = await extract({ doc, url: "https://news.example.com/", contentSelector: GENERIC, autoSelect: false });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.article.bodyMarkdown).not.toContain("Story headline number 5 that is long enough");
+  });
+
+  it("keeps portal sections called 'Top Stories' / 'Trending' in the headline list", async () => {
+    const section = (title: string, from: number) =>
+      `<section><h2>${title}</h2>` + Array.from({ length: 8 }, (_, i) => card(from + i)).join("") + `</section>`;
+    const doc = createDocument(
+      `<!DOCTYPE html><html><head><title>Home</title></head><body><main>${section("Top Stories", 0)}${section("Trending Stories", 100)}${PARA(1)}</main></body></html>`,
+      "https://news.example.com/",
+    );
+    const result = await extract({ doc, url: "https://news.example.com/", autoSelect: true });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.article.bodyMarkdown).toContain("Story headline number 0 ");
+    expect(result.article.bodyMarkdown).toContain("Story headline number 107 ");
   });
 
   it("respects a selector the user picked themselves (no index override)", async () => {

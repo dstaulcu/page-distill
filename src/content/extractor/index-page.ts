@@ -4,7 +4,7 @@
  * A news front page has no single "article": Readability picks one story card
  * and the other hundred headlines vanish. For those pages the useful content
  * IS the list of headlines, so this builds it from headings that contain links.
- * The caller decides when to use it (see `isIndexPage` in extract.ts).
+ * The caller decides when to use it (see `extract()` in extract.ts).
  */
 
 import { stripNoise } from "./noise";
@@ -26,11 +26,22 @@ function normalize(text: string | null | undefined): string {
   return (text ?? "").replace(/\s+/g, " ").trim();
 }
 
+function withoutHash(href: string): string {
+  return href.split("#")[0];
+}
+
+/**
+ * Resolves a heading link to an absolute http(s) URL, or null when it isn't a
+ * link to another page (in-page anchors, javascript:, a permalink back to this
+ * very page). Parentheses are percent-encoded so they can't end the markdown link.
+ */
 function resolveHttpUrl(href: string | null, base: string): string | null {
   if (!href || href.startsWith("#")) return null;
   try {
     const url = new URL(href, base);
-    return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    if (withoutHash(url.href) === withoutHash(new URL(base).href)) return null; // self-anchor / permalink
+    return url.href.replace(/\(/g, "%28").replace(/\)/g, "%29");
   } catch {
     return null;
   }
@@ -43,8 +54,15 @@ function resolveHttpUrl(href: string | null, base: string): string | null {
 export function buildHeadlineIndex(doc: Document, baseUrl: string): HeadlineIndex | null {
   if (!doc.body) return null;
 
+  // Cheap pre-check on the live page (read-only) so ordinary articles never
+  // pay for cloning and stripping the whole document.
+  if (doc.body.querySelectorAll("h1 a[href], h2 a[href], h3 a[href], h4 a[href], a[href] h1, a[href] h2, a[href] h3, a[href] h4").length < MIN_HEADLINES) {
+    return null;
+  }
+
   const body = doc.body.cloneNode(true) as HTMLElement; // never touch the live page
-  stripNoise(body);
+  // "Top Stories" / "Trending" are the page's real sections here, not promo modules
+  stripNoise(body, { promoModules: false });
 
   const seen = new Set<string>();
   const lines: string[] = [];

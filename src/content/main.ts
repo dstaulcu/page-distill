@@ -47,10 +47,11 @@ async function refreshDebugLoggingFlag(): Promise<void> {
 async function handleExtractRequested(
   msg: MessageOf<"extractRequested">,
 ): Promise<MessageOf<"extractResult">> {
-  const { selector } = msg.payload;
+  const { selector, autoSelect } = msg.payload;
 
   const result = await extract({
     contentSelector: selector,
+    autoSelect,
   });
 
   let payload: ExtractResultPayload;

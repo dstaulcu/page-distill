@@ -19,6 +19,8 @@ export interface Message<K extends string, P> {
 export interface ExtractRequestedPayload {
   readonly tabId: number;
   readonly selector?: string;
+  /** The selector is automatic (none, or the built-in generic one), not a user-saved/picked one. */
+  readonly autoSelect?: boolean;
 }
 
 export interface ExtractResultPayload {

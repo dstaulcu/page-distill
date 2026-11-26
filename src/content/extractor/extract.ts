@@ -5,7 +5,6 @@ import { pickContentElement } from "./candidates";
 import { stripNoise } from "./noise";
 import { assessConfidence, measureMarkdown } from "./confidence";
 import { buildHeadlineIndex } from "./index-page";
-import { BUILTIN_GENERIC_FALLBACK_PATTERN } from "@background/site-patterns/matcher";
 import type { ExtractedArticle } from "@shared/types";
 
 // ---------------------------------------------------------------------------
@@ -14,6 +13,12 @@ import type { ExtractedArticle } from "@shared/types";
 
 export interface ExtractOptions {
   readonly contentSelector?: string;
+  /**
+   * True when the selector (if any) is automatic — none was resolved, or it is
+   * the built-in generic fallback — as opposed to one the user saved or picked.
+   * Only automatic selection may be replaced by the portal-page headline list.
+   */
+  readonly autoSelect?: boolean;
   readonly doc?: Document;
   readonly url?: string;
 }
@@ -46,8 +51,7 @@ export async function extract(opts?: ExtractOptions): Promise<ExtractionResult> 
   // page vanishes. When the extraction is a sliver of a page that is mostly
   // linked headlines, return the headline list instead. Only for automatic
   // selection — a selector the user picked is always respected.
-  const selector = opts?.contentSelector;
-  if (selector && selector !== BUILTIN_GENERIC_FALLBACK_PATTERN.contentSelector) return result;
+  if (opts?.contentSelector && !opts.autoSelect) return result;
 
   try {
     const doc = opts?.doc ?? document;

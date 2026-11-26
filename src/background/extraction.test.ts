@@ -60,6 +60,33 @@ function makeDeps(overrides?: Partial<ExtractionServiceDeps>): ExtractionService
   };
 }
 
+describe("CF-1 autoSelect flag: user-chosen selectors must never be overridden", () => {
+  const userPattern: SitePattern = { id: "u1", source: "user", urlMatchPattern: "*://example.com/*", contentSelector: ".mine" };
+
+  it("is true when no pattern matches beyond the built-in fallback (selector resolved from the built-in list)", async () => {
+    const deps = makeDeps();
+    await createExtractionService(deps).extractContent(1);
+
+    expect(deps.sentMessages[0].payload.autoSelect).toBe(true);
+  });
+
+  it("is false when a user-saved pattern supplies the selector, even if its text equals the built-in one", async () => {
+    const deps = makeDeps({ getSettings: async () => makeSettings([userPattern]) });
+    await createExtractionService(deps).extractContent(1);
+
+    expect(deps.sentMessages[0].payload.selector).toBe(".mine");
+    expect(deps.sentMessages[0].payload.autoSelect).toBe(false);
+  });
+
+  it("is false when the caller passes an explicit selector (picker, preview)", async () => {
+    const deps = makeDeps();
+    await createExtractionService(deps).extractContent(1, "#picked");
+
+    expect(deps.sentMessages[0].payload.selector).toBe("#picked");
+    expect(deps.sentMessages[0].payload.autoSelect).toBe(false);
+  });
+});
+
 describe("CF-1.5 privileged-page guard", () => {
   it.each(["about:blank", "about:config", "moz-extension://abc/page.html", "chrome://settings", ""])(
     "refuses extraction for %j without messaging the content script",

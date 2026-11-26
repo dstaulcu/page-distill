@@ -137,3 +137,59 @@ describe("CF-1 stripNoise: promo sections and ad labels inside the article", () 
     expect(root.textContent).not.toContain("Buy things now");
   });
 });
+
+describe("CF-1 stripNoise: precision and cost", () => {
+  const prose = (n: number) => "A full sentence of real article prose that readers came for. ".repeat(n);
+
+  it("can leave promo-headed modules alone (portal pages, where 'Top Stories' is real content)", () => {
+    const html = `<div><section><h2>Top Stories</h2><p><a href="/a">A real headline for the page</a></p></section><p>${prose(12)}</p></div>`;
+    const kept = body(html);
+    stripNoise(kept, { promoModules: false });
+    expect(kept.textContent).toContain("Top Stories");
+
+    const stripped = body(html);
+    stripNoise(stripped);
+    expect(stripped.textContent).not.toContain("Top Stories");
+  });
+
+  it("does not treat layout classes that merely contain 'promo' as ads", () => {
+    const root = body(
+      `<div class="article promo-enabled"><p>KEEP-ENABLED ${prose(4)}</p></div>` +
+        `<div class="story promoted-post-layout"><p>KEEP-LAYOUT ${prose(4)}</p></div>` +
+        `<div class="promo-banner">DROP-BANNER</div>` +
+        `<div class="InlinePromo x">DROP-INLINE</div>`,
+    );
+    stripNoise(root);
+    expect(root.textContent).toContain("KEEP-ENABLED");
+    expect(root.textContent).toContain("KEEP-LAYOUT");
+    expect(root.textContent).not.toContain("DROP-BANNER");
+    expect(root.textContent).not.toContain("DROP-INLINE");
+  });
+
+  it("only treats leaf-like text elements as ad labels, never table cells, list items or links", () => {
+    const root = body(
+      `<p>${prose(8)}</p><table><tr><td>Ads</td><td>Organic</td></tr></table><ul><li>Sponsored</li></ul><a href="/x">Advertisement</a><div>Advertisement</div>`,
+    );
+    stripNoise(root);
+    expect(root.querySelector("td")?.textContent).toBe("Ads");
+    expect(root.querySelector("li")?.textContent).toBe("Sponsored");
+    expect(root.querySelector("a")?.textContent).toBe("Advertisement");
+    expect(root.textContent?.match(/Advertisement/g)).toHaveLength(1); // only the link's text remains
+  });
+
+  it("stays fast on a large, deeply nested page (no per-element subtree scans)", () => {
+    const block = (i: number) => `<div><div><section><h3>Section ${i}</h3><p>${prose(2)}</p><ul><li>one</li><li>two</li></ul></section></div></div>`;
+    let inner = Array.from({ length: 3200 }, (_, i) => block(i)).join("");
+    for (let d = 0; d < 25; d++) inner = `<div class="wrap${d}">${inner}</div>`;
+    const root = body(inner);
+    const nodes = root.querySelectorAll("*").length;
+    expect(nodes).toBeGreaterThan(25000);
+
+    const start = performance.now();
+    stripNoise(root);
+    const ms = performance.now() - start;
+
+    // Generous: the point is to catch an accidental return to per-element subtree scans
+    expect(ms).toBeLessThan(2500);
+  });
+});
