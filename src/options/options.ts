@@ -2,26 +2,26 @@
  * Settings page entry point.
  *
  * Vanilla TypeScript UI for configuring AI endpoint, site patterns,
- * export preferences, and auto-export configurations.
+ * and export preferences.
  * Communicates with the background via browser.runtime.sendMessage.
  */
 
-import type { Settings, SitePattern, AutoExportConfig, ExportDestination, AutoExportMode, SkillLibrary, StoredSkill, Persona } from "@shared/types";
+import type { Settings, SitePattern } from "@shared/types";
 import { buildMessage, sendToBackground, isMessageOfKind } from "@shared/messages";
 import type { FieldError } from "@background/settings/manager";
-import { parseSkillFile } from "@shared/skill-parser";
+import { createLogger } from "@shared/logger";
+import { backfillDefaults, DEFAULT_SETTINGS } from "@background/settings/defaults";
+import { validateContextWindowTokens } from "@shared/context-window";
+import { getProviderUi, isAiProvider, DEFAULT_AI_PROVIDER } from "@shared/providers";
+import type { AiProvider } from "@shared/types";
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 const MAX_USER_PATTERNS = 50;
-const MAX_SKILLS = 20;
-const MAX_PERSONAS = 10;
-const SKILL_MAX_SIZE = 512 * 1024;
 const CONNECTION_TEST_TIMEOUT_MS = 10_000;
 const SELECTOR_PREVIEW_MAX_CHARS = 500;
-const LIBRARY_STORAGE_KEY = "distill_skill_library";
 
 // ---------------------------------------------------------------------------
 // State
@@ -30,18 +30,16 @@ const LIBRARY_STORAGE_KEY = "distill_skill_library";
 interface OptionsState {
   settings: Settings | null;
   editingPatternIndex: number | null;
-  editingAutoExportOrigin: string | null;
-  library: SkillLibrary | null;
-  editingPersonaId: string | null;
 }
 
 const state: OptionsState = {
   settings: null,
   editingPatternIndex: null,
-  editingAutoExportOrigin: null,
-  library: null,
-  editingPersonaId: null,
 };
+
+// SF-8: reads state.settings directly rather than caching — this module
+// already holds current settings synchronously, unlike content script/sidebar.
+const logger = createLogger({ getEnabled: () => state.settings?.debugLogging ?? false });
 
 // ---------------------------------------------------------------------------
 // DOM References
@@ -63,7 +61,6 @@ function $input(id: string): HTMLInputElement {
 
 document.addEventListener("DOMContentLoaded", async () => {
   await loadSettings();
-  await loadLibrary();
   bindEventListeners();
 });
 
@@ -77,22 +74,17 @@ async function loadSettings(): Promise<void> {
       settings = local?.settings as Settings ?? null;
     }
     if (!settings) {
-      // No settings stored yet — use defaults
-      settings = {
-        schemaVersion: 1,
-        ai: { baseUrl: "", modelId: "", apiKeyRef: null, systemPrompt: "" },
-        export: {
-          filenamePattern: "YYYY-MM-DD-slugified-title",
-          defaultDestination: { kind: "download" },
-          frontmatterFields: ["title", "author", "source_url", "publication_date", "capture_date", "site_name"],
-        },
-        sitePatterns: [],
-        autoExportConfigs: [],
-      };
+      // No settings stored yet — use the defaults (provider: Ollama)
+      settings = DEFAULT_SETTINGS;
     }
-    state.settings = settings;
+    // Settings saved by an older version lack newer fields (CF-5.6, SF-8) —
+    // fill them in, exactly as the settings manager does, so the form never
+    // shows "undefined" and saving an unrelated field never fails validation.
+    state.settings = backfillDefaults(settings);
+    logger.debug("Settings loaded");
     renderAll();
-  } catch {
+  } catch (err) {
+    logger.warn("Settings load failed", err instanceof Error ? err.message : String(err));
     showSaveStatus("Failed to load settings", true);
   }
 }
@@ -109,6 +101,7 @@ function bindEventListeners(): void {
   $("btn-fetch-models").addEventListener("click", handleFetchModels);
   ($("ai-model-select") as HTMLSelectElement).addEventListener("change", handleModelSelect);
   $input("ai-base-url").addEventListener("change", handleFetchModels);
+  $("ai-provider").addEventListener("change", () => applyProviderUi(readProvider()));
 
   // Pattern management
   $("btn-add-pattern").addEventListener("click", handleAddPattern);
@@ -117,17 +110,6 @@ function bindEventListeners(): void {
 
   // Selector preview on input change
   $input("pattern-selector").addEventListener("input", handleSelectorPreview);
-
-  // Skill library
-  $("btn-add-skill").addEventListener("click", () => {
-    ($("skill-file-input") as HTMLInputElement).click();
-  });
-  ($("skill-file-input") as HTMLInputElement).addEventListener("change", handleSkillUpload);
-
-  // Persona management
-  $("btn-add-persona").addEventListener("click", handleAddPersona);
-  $("btn-save-persona").addEventListener("click", handleSavePersona);
-  $("btn-cancel-persona").addEventListener("click", handleCancelPersona);
 
   // Save settings
   $("btn-save-settings").addEventListener("click", handleSaveSettings);
@@ -142,14 +124,36 @@ function renderAll(): void {
   renderAiSection();
   renderExportSection();
   renderPatternsSection();
-  renderAutoExportSection();
-  renderSkillLibrarySection();
+  renderDebuggingSection();
+}
+
+function renderDebuggingSection(): void {
+  if (!state.settings) return;
+  $input("debug-logging-enabled").checked = state.settings.debugLogging;
+}
+
+/** The provider currently selected in the form (falls back to the default). */
+function readProvider(): AiProvider {
+  const value = ($("ai-provider") as HTMLSelectElement).value;
+  return isAiProvider(value) ? value : DEFAULT_AI_PROVIDER;
+}
+
+/** Adapt the AI section to the selected provider (CF-5.7): placeholders, hint, and the Ollama-only context window. */
+function applyProviderUi(provider: AiProvider): void {
+  const ui = getProviderUi(provider);
+  $input("ai-base-url").placeholder = ui.baseUrlPlaceholder;
+  $input("ai-api-key").placeholder = ui.apiKeyPlaceholder;
+  $("ai-provider-hint").textContent = ui.description;
+  $("group-ai-context-window").classList.toggle("hidden", !ui.usesContextWindow);
 }
 
 function renderAiSection(): void {
   if (!state.settings) return;
+  ($("ai-provider") as HTMLSelectElement).value = state.settings.ai.provider;
+  applyProviderUi(state.settings.ai.provider);
   $input("ai-base-url").value = state.settings.ai.baseUrl;
   $input("ai-model-id").value = state.settings.ai.modelId;
+  $input("ai-context-window").value = String(state.settings.ai.contextWindowTokens);
 
   // Set the dropdown to the current model if it's in the list
   const select = $("ai-model-select") as HTMLSelectElement;
@@ -229,90 +233,6 @@ function renderPatternItem(pattern: SitePattern, index: number): string {
   `;
 }
 
-function renderAutoExportSection(): void {
-  if (!state.settings) return;
-  const list = $("auto-export-list");
-  const configs = state.settings.autoExportConfigs;
-
-  if (configs.length === 0) {
-    list.innerHTML = '<div class="empty-state">No auto-export configurations.</div>';
-    return;
-  }
-
-  list.innerHTML = configs
-    .map((config) => renderAutoExportItem(config))
-    .join("");
-
-  // Bind edit/delete buttons
-  list.querySelectorAll<HTMLButtonElement>("[data-action='edit-auto-export']").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      handleEditAutoExport(btn.dataset.origin!);
-    });
-  });
-
-  list.querySelectorAll<HTMLButtonElement>("[data-action='delete-auto-export']").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      handleDeleteAutoExport(btn.dataset.origin!);
-    });
-  });
-}
-
-function renderAutoExportItem(config: AutoExportConfig): string {
-  const destLabel = config.destination.kind === "download" ? "Download" : "Clipboard";
-  const modeLabel = config.mode === "content-only" ? "Content only" : "Full";
-  const isEditing = state.editingAutoExportOrigin === config.origin;
-
-  let editorHtml = "";
-  if (isEditing) {
-    editorHtml = `
-      <div class="auto-export-editor">
-        <div class="form-row">
-          <div class="form-group">
-            <label for="ae-enabled-${escapeAttr(config.origin)}">Enabled</label>
-            <input type="checkbox" id="ae-enabled-${escapeAttr(config.origin)}" ${config.enabled ? "checked" : ""} />
-          </div>
-          <div class="form-group">
-            <label for="ae-interval-${escapeAttr(config.origin)}">Interval (min)</label>
-            <input type="number" id="ae-interval-${escapeAttr(config.origin)}" min="1" max="120" value="${config.intervalMinutes}" />
-          </div>
-          <div class="form-group">
-            <label for="ae-dest-${escapeAttr(config.origin)}">Destination</label>
-            <select id="ae-dest-${escapeAttr(config.origin)}">
-              <option value="download" ${config.destination.kind === "download" ? "selected" : ""}>Download</option>
-              <option value="clipboard" ${config.destination.kind === "clipboard" ? "selected" : ""}>Clipboard</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label for="ae-mode-${escapeAttr(config.origin)}">Mode</label>
-            <select id="ae-mode-${escapeAttr(config.origin)}">
-              <option value="content-only" ${config.mode === "content-only" ? "selected" : ""}>Content only</option>
-              <option value="full" ${config.mode === "full" ? "selected" : ""}>Full</option>
-            </select>
-          </div>
-        </div>
-        <div class="form-group form-actions">
-          <button type="button" data-action="save-auto-export" data-origin="${escapeAttr(config.origin)}">Save</button>
-          <button type="button" class="btn-secondary" data-action="cancel-auto-export">Cancel</button>
-        </div>
-      </div>
-    `;
-  }
-
-  return `
-    <div class="auto-export-item">
-      <div class="auto-export-item-info">
-        <div class="auto-export-item-origin">${escapeHtml(config.origin)}</div>
-        <div class="auto-export-item-details">Every ${config.intervalMinutes} min · ${destLabel} · ${modeLabel}${config.skipIfUnchanged ? " · Skip unchanged" : ""}</div>
-      </div>
-      <div class="auto-export-item-actions">
-        <button class="btn-small btn-secondary" data-action="edit-auto-export" data-origin="${escapeAttr(config.origin)}">Edit</button>
-        <button class="btn-small btn-danger" data-action="delete-auto-export" data-origin="${escapeAttr(config.origin)}">Delete</button>
-      </div>
-    </div>
-    ${editorHtml}
-  `;
-}
-
 // ---------------------------------------------------------------------------
 // Handlers: AI Connection Test
 // ---------------------------------------------------------------------------
@@ -349,22 +269,28 @@ async function handleConnectionTest(): Promise<void> {
     if (response && typeof response === "object" && isMessageOfKind(response, "connectionTestResult")) {
       const result = response.payload;
       if (result.ok) {
+        logger.debug("Connection test succeeded");
         showConnectionStatus("Connected successfully", "success");
       } else {
+        logger.warn("Connection test failed", result.reason);
         showConnectionStatus(result.reason ?? "Connection failed", "error");
       }
     } else if (response && typeof response === "object") {
       // Direct result from background handler
       const result = response as { ok: boolean; reason?: string; detail?: string };
       if (result.ok) {
+        logger.debug("Connection test succeeded");
         showConnectionStatus("Connected successfully", "success");
       } else {
+        logger.warn("Connection test failed", result.detail ?? result.reason);
         showConnectionStatus(result.detail ?? result.reason ?? "Connection failed", "error");
       }
     } else {
+      logger.warn("Connection test failed: unexpected response shape");
       showConnectionStatus("Unexpected response", "error");
     }
   } catch (err) {
+    logger.warn("Connection test failed with an error", err instanceof Error ? err.message : String(err));
     const message = err instanceof Error && err.message === "timeout"
       ? "Connection timed out (10s)"
       : "Connection failed";
@@ -646,101 +572,6 @@ async function handleSelectorPreview(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Handlers: Auto-Export
-// ---------------------------------------------------------------------------
-
-function handleEditAutoExport(origin: string): void {
-  state.editingAutoExportOrigin = origin;
-  renderAutoExportSection();
-
-  // Bind save/cancel in the editor
-  const list = $("auto-export-list");
-  list.querySelectorAll<HTMLButtonElement>("[data-action='save-auto-export']").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      void handleSaveAutoExport(btn.dataset.origin!);
-    });
-  });
-  list.querySelectorAll<HTMLButtonElement>("[data-action='cancel-auto-export']").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      state.editingAutoExportOrigin = null;
-      renderAutoExportSection();
-    });
-  });
-}
-
-async function handleSaveAutoExport(origin: string): Promise<void> {
-  if (!state.settings) return;
-
-  const escapedOrigin = escapeAttr(origin);
-  const enabledInput = document.getElementById(`ae-enabled-${escapedOrigin}`) as HTMLInputElement | null;
-  const intervalInput = document.getElementById(`ae-interval-${escapedOrigin}`) as HTMLInputElement | null;
-  const destSelect = document.getElementById(`ae-dest-${escapedOrigin}`) as HTMLSelectElement | null;
-  const modeSelect = document.getElementById(`ae-mode-${escapedOrigin}`) as HTMLSelectElement | null;
-
-  if (!intervalInput || !destSelect || !modeSelect) return;
-
-  const interval = parseInt(intervalInput.value, 10);
-  if (!Number.isInteger(interval) || interval < 1 || interval > 120) {
-    showSaveStatus("Interval must be between 1 and 120 minutes", true);
-    return;
-  }
-
-  const enabled = enabledInput ? enabledInput.checked : true;
-  const destination: ExportDestination = { kind: destSelect.value as "download" | "clipboard" };
-  const mode: AutoExportMode = modeSelect.value as AutoExportMode;
-  const existing = state.settings.autoExportConfigs.find((c) => c.origin === origin);
-
-  // Persist immediately through the background (SF-4) — auto-export edits must
-  // not depend on the separate "Save Settings" button.
-  try {
-    await sendToBackground("autoExportConfigSave", {
-      origin,
-      enabled,
-      intervalMinutes: interval,
-      destination,
-      mode,
-      skipIfUnchanged: existing?.skipIfUnchanged ?? true,
-    });
-  } catch {
-    showSaveStatus("Failed to save auto-export configuration", true);
-    return;
-  }
-
-  const updatedConfigs = state.settings.autoExportConfigs.map((config) => {
-    if (config.origin === origin) {
-      return {
-        ...config,
-        enabled,
-        intervalMinutes: interval,
-        destination,
-        mode,
-        updatedAt: new Date().toISOString(),
-      };
-    }
-    return config;
-  });
-
-  state.settings = { ...state.settings, autoExportConfigs: updatedConfigs };
-  state.editingAutoExportOrigin = null;
-  renderAutoExportSection();
-  showSaveStatus("Auto-export configuration saved", false);
-}
-
-function handleDeleteAutoExport(origin: string): void {
-  if (!state.settings) return;
-
-  const updatedConfigs = state.settings.autoExportConfigs.filter((c) => c.origin !== origin);
-  state.settings = { ...state.settings, autoExportConfigs: updatedConfigs };
-
-  // Also send delete message to background
-  sendToBackground("autoExportConfigDelete", { origin }).catch(() => {
-    // Ignore errors — will be persisted on save
-  });
-
-  renderAutoExportSection();
-}
-
-// ---------------------------------------------------------------------------
 // Handlers: Save Settings
 // ---------------------------------------------------------------------------
 
@@ -748,10 +579,17 @@ async function handleSaveSettings(): Promise<void> {
   if (!state.settings) return;
 
   // Gather current form values
+  const provider = readProvider();
   const baseUrl = $input("ai-base-url").value.trim();
   const modelId = $input("ai-model-id").value.trim();
   const apiKey = $input("ai-api-key").value.trim();
+  // The context window only applies to Ollama (CF-5.7); for other providers the
+  // control is hidden, so keep the stored value instead of validating a hidden field.
+  const contextWindowTokens = getProviderUi(provider).usesContextWindow
+    ? Number($input("ai-context-window").value.trim())
+    : state.settings.ai.contextWindowTokens;
   const filenamePattern = $input("export-filename-pattern").value.trim();
+  const debugLogging = $input("debug-logging-enabled").checked;
 
   // Gather frontmatter fields
   const frontmatterFields: string[] = [];
@@ -761,7 +599,7 @@ async function handleSaveSettings(): Promise<void> {
   });
 
   // Client-side validation
-  const errors = validateFormFields(baseUrl, filenamePattern);
+  const errors = validateFormFields(baseUrl, filenamePattern, contextWindowTokens);
   clearAllFieldErrors();
   if (errors.length > 0) {
     displayFieldErrors(errors);
@@ -773,14 +611,17 @@ async function handleSaveSettings(): Promise<void> {
     ...state.settings,
     ai: {
       ...state.settings.ai,
+      provider,
       baseUrl,
       modelId,
+      contextWindowTokens,
     },
     export: {
       ...state.settings.export,
       filenamePattern,
       frontmatterFields,
     },
+    debugLogging,
   };
 
   const btn = $("btn-save-settings") as HTMLButtonElement;
@@ -791,6 +632,7 @@ async function handleSaveSettings(): Promise<void> {
     // the sync→local quota fallback, and broadcasts the change to all contexts.
     const saveResponse = await sendToBackground("settingsChanged", settingsToSave);
     if (isMessageOfKind(saveResponse, "settingsSaveResult") && !saveResponse.payload.ok) {
+      logger.warn("Settings save rejected: validation failed", saveResponse.payload.errors);
       displayFieldErrors(saveResponse.payload.errors ?? []);
       showSaveStatus("Settings not saved — fix the highlighted fields", true);
       return;
@@ -805,6 +647,7 @@ async function handleSaveSettings(): Promise<void> {
         finalSettings = { ...settingsToSave, ai: { ...settingsToSave.ai, apiKeyRef: response.payload.ref } };
         $input("ai-api-key").value = "";
       } else {
+        logger.warn("Settings saved, but API key save failed");
         showSaveStatus("Settings saved, but storing the API key failed", true);
         state.settings = settingsToSave;
         renderAll();
@@ -813,9 +656,11 @@ async function handleSaveSettings(): Promise<void> {
     }
 
     state.settings = finalSettings;
+    logger.debug("Settings saved");
     showSaveStatus("Settings saved", false);
     renderAll();
-  } catch {
+  } catch (err) {
+    logger.warn("Settings save failed with an error", err instanceof Error ? err.message : String(err));
     showSaveStatus("Failed to save settings", true);
   } finally {
     btn.disabled = false;
@@ -826,12 +671,18 @@ async function handleSaveSettings(): Promise<void> {
 // Client-Side Validation
 // ---------------------------------------------------------------------------
 
-function validateFormFields(baseUrl: string, filenamePattern: string): FieldError[] {
+function validateFormFields(baseUrl: string, filenamePattern: string, contextWindowTokens: number): FieldError[] {
   const errors: FieldError[] = [];
 
   // AI base URL: must start with http:// or https:// when non-empty
   if (baseUrl !== "" && !/^https?:\/\//.test(baseUrl)) {
     errors.push({ field: "ai.baseUrl", message: "Base URL must start with http:// or https://" });
+  }
+
+  // Context window: integer within the CF-5.6 bounds
+  const contextWindowError = validateContextWindowTokens(contextWindowTokens);
+  if (contextWindowError) {
+    errors.push({ field: "ai.contextWindowTokens", message: contextWindowError });
   }
 
   // Filename pattern: must be non-empty
@@ -864,9 +715,11 @@ function clearAllFieldErrors(): void {
 
 function fieldToElementId(field: string): string {
   const map: Record<string, string> = {
+    "ai.provider": "ai-provider",
     "ai.baseUrl": "ai-base-url",
     "ai.modelId": "ai-model-id",
     "ai.apiKey": "ai-api-key",
+    "ai.contextWindowTokens": "ai-context-window",
     "export.filenamePattern": "export-filename-pattern",
   };
   return map[field] ?? field;
@@ -909,271 +762,6 @@ function escapeAttr(str: string): string {
       default: return ch;
     }
   });
-}
-
-// ---------------------------------------------------------------------------
-// Skill Library & Personas
-// ---------------------------------------------------------------------------
-
-async function loadLibrary(): Promise<void> {
-  try {
-    const stored = await browser.storage.local.get(LIBRARY_STORAGE_KEY);
-    const lib = stored?.[LIBRARY_STORAGE_KEY] as SkillLibrary | undefined;
-    if (lib && typeof lib === "object" && lib.schemaVersion === 1) {
-      state.library = lib;
-    } else {
-      state.library = { schemaVersion: 1, skills: [], personas: [], active: { kind: "none" } };
-    }
-    renderSkillLibrarySection();
-  } catch {
-    state.library = { schemaVersion: 1, skills: [], personas: [], active: { kind: "none" } };
-  }
-}
-
-async function saveLibrary(): Promise<void> {
-  if (!state.library) return;
-  await browser.storage.local.set({ [LIBRARY_STORAGE_KEY]: state.library });
-}
-
-function renderSkillLibrarySection(): void {
-  if (!state.library) return;
-
-  // Skills list
-  const skillsList = $("skills-list");
-  if (state.library.skills.length === 0) {
-    skillsList.innerHTML = '<p class="empty-list">No skills uploaded yet.</p>';
-  } else {
-    skillsList.innerHTML = state.library.skills.map((skill) => `
-      <div class="skill-item">
-        <div class="skill-item-info">
-          <div class="skill-item-name">${escapeHtml(skill.name)}</div>
-          <div class="skill-item-desc">${escapeHtml(skill.description)}</div>
-        </div>
-        <button class="btn-small btn-danger" data-action="delete-skill" data-id="${escapeAttr(skill.id)}">Delete</button>
-      </div>
-    `).join("");
-
-    skillsList.querySelectorAll("[data-action='delete-skill']").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const id = (btn as HTMLElement).dataset.id!;
-        handleDeleteSkill(id);
-      });
-    });
-  }
-
-  // Personas list
-  const personasList = $("personas-list");
-  if (state.library.personas.length === 0) {
-    personasList.innerHTML = '<p class="empty-list">No personas created yet.</p>';
-  } else {
-    personasList.innerHTML = state.library.personas.map((persona) => {
-      const skillNames = persona.skillIds
-        .map((sid) => state.library!.skills.find((s) => s.id === sid)?.name ?? "?")
-        .join(", ");
-      return `
-        <div class="persona-item">
-          <div class="persona-item-info">
-            <div class="persona-item-name">${escapeHtml(persona.name)}</div>
-            <div class="persona-item-desc">${escapeHtml(skillNames)} (${persona.skillIds.length} skills)</div>
-          </div>
-          <div class="persona-item-actions">
-            <button class="btn-small btn-secondary" data-action="edit-persona" data-id="${escapeAttr(persona.id)}">Edit</button>
-            <button class="btn-small btn-danger" data-action="delete-persona" data-id="${escapeAttr(persona.id)}">Delete</button>
-          </div>
-        </div>
-      `;
-    }).join("");
-
-    personasList.querySelectorAll("[data-action='edit-persona']").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        handleEditPersona((btn as HTMLElement).dataset.id!);
-      });
-    });
-    personasList.querySelectorAll("[data-action='delete-persona']").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        handleDeletePersona((btn as HTMLElement).dataset.id!);
-      });
-    });
-  }
-}
-
-function handleSkillUpload(): void {
-  const input = $("skill-file-input") as HTMLInputElement;
-  if (!input.files || input.files.length === 0) return;
-  const file = input.files[0];
-  input.value = "";
-
-  if (!file.name.endsWith(".md")) {
-    showSaveStatus("Only .md files are accepted", true);
-    return;
-  }
-  if (file.size > SKILL_MAX_SIZE) {
-    showSaveStatus("Skill file too large (max 512 KB)", true);
-    return;
-  }
-  if (state.library && state.library.skills.length >= MAX_SKILLS) {
-    showSaveStatus(`Skill library is full (max ${MAX_SKILLS})`, true);
-    return;
-  }
-
-  const reader = new FileReader();
-  reader.onload = async () => {
-    const raw = reader.result as string;
-    const result = parseSkillFile(raw);
-    if (!result.ok) {
-      showSaveStatus(`Skill parse error: ${result.errors.join(", ")}`, true);
-      return;
-    }
-
-    if (!state.library) return;
-    const skill = result.skill;
-    const existingIndex = state.library.skills.findIndex((s) => s.name === skill.name);
-    const id = existingIndex >= 0 ? state.library.skills[existingIndex].id : `skill-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const stored: StoredSkill = { ...skill, id, addedAt: existingIndex >= 0 ? state.library.skills[existingIndex].addedAt : new Date().toISOString() };
-
-    let skills: StoredSkill[];
-    if (existingIndex >= 0) {
-      skills = [...state.library.skills];
-      skills[existingIndex] = stored;
-    } else {
-      skills = [...state.library.skills, stored];
-    }
-
-    state.library = { ...state.library, skills };
-    await saveLibrary();
-    renderSkillLibrarySection();
-    showSaveStatus(existingIndex >= 0 ? `Skill "${skill.name}" updated` : `Skill "${skill.name}" added`, false);
-  };
-  reader.onerror = () => {
-    showSaveStatus("Failed to read skill file", true);
-  };
-  reader.readAsText(file);
-}
-
-async function handleDeleteSkill(id: string): Promise<void> {
-  if (!state.library) return;
-  const skills = state.library.skills.filter((s) => s.id !== id);
-
-  // Remove from personas
-  let personas = state.library.personas.map((p) => {
-    const filtered = p.skillIds.filter((sid) => sid !== id);
-    return filtered.length === p.skillIds.length ? p : { ...p, skillIds: filtered, updatedAt: new Date().toISOString() };
-  }).filter((p) => p.skillIds.length > 0);
-
-  // Deactivate if needed
-  let active = state.library.active;
-  if (active.kind === "skill" && active.skillId === id) {
-    active = { kind: "none" };
-  } else if (active.kind === "persona") {
-    const personaId = active.personaId;
-    if (!personas.some((p) => p.id === personaId)) {
-      active = { kind: "none" };
-    }
-  }
-
-  state.library = { ...state.library, skills, personas, active };
-  await saveLibrary();
-  renderSkillLibrarySection();
-}
-
-function handleAddPersona(): void {
-  if (!state.library) return;
-  if (state.library.personas.length >= MAX_PERSONAS) {
-    showSaveStatus(`Persona limit reached (max ${MAX_PERSONAS})`, true);
-    return;
-  }
-  state.editingPersonaId = null;
-  showPersonaEditor("Create Persona", "", "", []);
-}
-
-function handleEditPersona(id: string): void {
-  if (!state.library) return;
-  const persona = state.library.personas.find((p) => p.id === id);
-  if (!persona) return;
-  state.editingPersonaId = id;
-  showPersonaEditor("Edit Persona", persona.name, persona.description, [...persona.skillIds]);
-}
-
-function showPersonaEditor(title: string, name: string, description: string, selectedIds: string[]): void {
-  $("persona-editor-title").textContent = title;
-  $input("persona-name").value = name;
-  $input("persona-description").value = description;
-
-  // Render skill checkboxes
-  const container = $("persona-skill-checkboxes");
-  if (!state.library) { container.innerHTML = ""; return; }
-  container.innerHTML = state.library.skills.map((s) => {
-    const checked = selectedIds.includes(s.id) ? "checked" : "";
-    return `<label><input type="checkbox" value="${escapeAttr(s.id)}" ${checked} /> ${escapeHtml(s.name)}</label>`;
-  }).join("");
-
-  $("persona-editor").classList.remove("hidden");
-  clearFieldErrors(["persona-name"]);
-}
-
-function handleCancelPersona(): void {
-  $("persona-editor").classList.add("hidden");
-  state.editingPersonaId = null;
-}
-
-async function handleSavePersona(): Promise<void> {
-  if (!state.library) return;
-
-  const name = $input("persona-name").value.trim();
-  const description = $input("persona-description").value.trim();
-  const checkboxes = $("persona-skill-checkboxes").querySelectorAll("input[type='checkbox']:checked");
-  const skillIds = Array.from(checkboxes).map((cb) => (cb as HTMLInputElement).value);
-
-  // Validate
-  clearFieldErrors(["persona-name"]);
-  if (!name) {
-    showFieldError("persona-name", "Name is required");
-    return;
-  }
-  if (skillIds.length === 0) {
-    showFieldError("persona-name", "Select at least one skill");
-    return;
-  }
-
-  const now = new Date().toISOString();
-
-  if (state.editingPersonaId) {
-    // Update existing
-    const personas = state.library.personas.map((p) =>
-      p.id === state.editingPersonaId ? { ...p, name, description, skillIds, updatedAt: now } : p
-    );
-    state.library = { ...state.library, personas };
-  } else {
-    // Create new
-    const persona: Persona = {
-      id: `persona-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      name,
-      description,
-      skillIds,
-      createdAt: now,
-      updatedAt: now,
-    };
-    state.library = { ...state.library, personas: [...state.library.personas, persona] };
-  }
-
-  const wasEditing = state.editingPersonaId !== null;
-  await saveLibrary();
-  $("persona-editor").classList.add("hidden");
-  state.editingPersonaId = null;
-  renderSkillLibrarySection();
-  showSaveStatus(wasEditing ? "Persona updated" : "Persona created", false);
-}
-
-async function handleDeletePersona(id: string): Promise<void> {
-  if (!state.library) return;
-  const personas = state.library.personas.filter((p) => p.id !== id);
-  let active = state.library.active;
-  if (active.kind === "persona" && active.personaId === id) {
-    active = { kind: "none" };
-  }
-  state.library = { ...state.library, personas, active };
-  await saveLibrary();
-  renderSkillLibrarySection();
 }
 
 function showFieldError(field: string, message: string): void {

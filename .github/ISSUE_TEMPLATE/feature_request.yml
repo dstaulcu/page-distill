@@ -9,7 +9,7 @@ body:
         Thanks for the suggestion. Please confirm this isn't already shipped
         in the latest release before filing — check the sidebar's **❓ Help**
         menu for your installed version, and compare against
-        https://github.com/dstaulcu/distill/releases
+        https://github.com/dstaulcu/page-distill/releases
 
   - type: input
     id: version

@@ -1,4 +1,5 @@
 import { Readability } from "@mozilla/readability";
+import { stripNoise } from "./noise";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -48,18 +49,29 @@ export function extractWithReadability(opts?: ReadabilityOptions): ReadabilityOu
   const doc = opts?.doc ?? document;
   const url = opts?.url ?? doc.baseURI;
 
-  // Readability mutates the document, so we clone it
-  const clonedDoc = doc.cloneNode(true) as Document;
+  // Readability mutates the document, so every attempt works on a fresh clone.
+  const parseClone = (stripBoilerplate: boolean) => {
+    const clonedDoc = doc.cloneNode(true) as Document;
 
-  // Set the document URL for Readability's internal link resolution
-  if (url) {
-    const base = clonedDoc.createElement("base");
-    base.setAttribute("href", url);
-    clonedDoc.head.appendChild(base);
+    // Set the document URL for Readability's internal link resolution
+    if (url && clonedDoc.head) {
+      const base = clonedDoc.createElement("base");
+      base.setAttribute("href", url);
+      clonedDoc.head.appendChild(base);
+    }
+
+    if (stripBoilerplate && clonedDoc.body) {
+      stripNoise(clonedDoc.body);
+    }
+    return new Readability(clonedDoc).parse();
+  };
+
+  // Ads / nav / hidden elements out first so they can't win Readability's
+  // scoring; if that leaves nothing, retry on the untouched page.
+  let parsed = parseClone(true);
+  if (parsed === null || parsed.textContent.trim().length === 0) {
+    parsed = parseClone(false);
   }
-
-  const reader = new Readability(clonedDoc);
-  const parsed = reader.parse();
 
   if (parsed === null || parsed.textContent.trim().length === 0) {
     return { ok: false, reason: "no-content-detected" };

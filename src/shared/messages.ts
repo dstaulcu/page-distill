@@ -41,6 +41,7 @@ export interface ExtractResultPayload {
 export interface ExportRequestedPayload {
   readonly tabId: number;
   readonly includeSummary?: boolean;
+  readonly includeContent?: boolean;
   readonly includeQA: boolean;
   readonly destinations: ReadonlyArray<{ readonly kind: "download" } | { readonly kind: "clipboard" }>;
 }
@@ -58,13 +59,20 @@ export interface ExportResultPayload {
   readonly detail?: string;
 }
 
+/** Minimal live update for content scripts (SF-8): only what they need, never the full settings. */
+export interface DebugLoggingChangedPayload {
+  readonly enabled: boolean;
+}
+
 export interface SettingsChangedPayload {
   readonly schemaVersion: number;
   readonly ai: {
+    readonly provider: "ollama" | "openai-compatible";
     readonly baseUrl: string;
     readonly modelId: string;
     readonly apiKeyRef: string | null;
     readonly systemPrompt: string;
+    readonly contextWindowTokens: number;
   };
   readonly export: {
     readonly filenamePattern: string;
@@ -78,16 +86,7 @@ export interface SettingsChangedPayload {
     readonly contentSelector: string;
     readonly stale?: boolean;
   }>;
-  readonly autoExportConfigs: ReadonlyArray<{
-    readonly origin: string;
-    readonly enabled: boolean;
-    readonly intervalMinutes: number;
-    readonly destination: { readonly kind: "download" } | { readonly kind: "clipboard" };
-    readonly mode: "content-only" | "full";
-    readonly skipIfUnchanged: boolean;
-    readonly createdAt: string;
-    readonly updatedAt: string;
-  }>;
+  readonly debugLogging: boolean;
 }
 
 export interface ClipboardWritePayload {
@@ -134,23 +133,6 @@ export interface PatternSaveResultPayload {
   readonly detail?: string;
 }
 
-export interface AutoExportConfigSavePayload {
-  readonly origin: string;
-  readonly enabled: boolean;
-  readonly intervalMinutes: number;
-  readonly destination: { readonly kind: "download" } | { readonly kind: "clipboard" };
-  readonly mode: "content-only" | "full";
-  readonly skipIfUnchanged: boolean;
-}
-
-export interface AutoExportConfigDeletePayload {
-  readonly origin: string;
-}
-
-export interface AutoExportStatusQueryPayload {
-  readonly tabId: number;
-}
-
 export interface SettingsSaveResultPayload {
   readonly ok: boolean;
   readonly errors?: ReadonlyArray<{ readonly field: string; readonly message: string }>;
@@ -177,17 +159,6 @@ export interface SelectorPreviewResultPayload {
   readonly reason?: string;
 }
 
-export interface AutoExportStatusResultPayload {
-  readonly status: {
-    readonly tabId: number;
-    readonly origin: string;
-    readonly lastCaptureTime: string | null;
-    readonly nextFireTime: number;
-    readonly lastHash: string | null;
-    readonly consecutiveFailures: number;
-  } | null;
-}
-
 // ─── Message Map (kind → payload) ───────────────────────────────────────────
 
 export interface MessagePayloadMap {
@@ -196,6 +167,7 @@ export interface MessagePayloadMap {
   exportRequested: ExportRequestedPayload;
   exportResult: ExportResultPayload;
   settingsChanged: SettingsChangedPayload;
+  debugLoggingChanged: DebugLoggingChangedPayload;
   clipboardWrite: ClipboardWritePayload;
   clipboardResult: ClipboardResultPayload;
   pickerActivate: PickerActivatePayload;
@@ -204,10 +176,6 @@ export interface MessagePayloadMap {
   connectionTestResult: ConnectionTestResultPayload;
   patternSave: PatternSavePayload;
   patternSaveResult: PatternSaveResultPayload;
-  autoExportConfigSave: AutoExportConfigSavePayload;
-  autoExportConfigDelete: AutoExportConfigDeletePayload;
-  autoExportStatusQuery: AutoExportStatusQueryPayload;
-  autoExportStatusResult: AutoExportStatusResultPayload;
   settingsSaveResult: SettingsSaveResultPayload;
   apiKeySave: ApiKeySavePayload;
   apiKeySaveResult: ApiKeySaveResultPayload;

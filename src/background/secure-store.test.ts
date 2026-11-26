@@ -324,3 +324,69 @@ describe("CF-5.3 SecureStore", () => {
     });
   });
 });
+
+describe("SF-8 logging", () => {
+  function makeSpyLogger() {
+    return { debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
+  }
+
+  it("logs a debug message when a secret is saved, without logging the secret value", async () => {
+    const logger = makeSpyLogger();
+    const store = createSecureStore({
+      storage: createMockStorage(),
+      crypto: globalThis.crypto.subtle,
+      generateId: createMockIdGenerator(),
+      logger,
+    });
+
+    await store.setSecret("key-ref", "sk-super-secret-value");
+
+    expect(logger.debug).toHaveBeenCalled();
+    const loggedText = logger.debug.mock.calls.flat().join(" ");
+    expect(loggedText).not.toContain("sk-super-secret-value");
+  });
+
+  it("logs a debug message when a secret is retrieved, without logging the secret value", async () => {
+    const logger = makeSpyLogger();
+    const store = createSecureStore({
+      storage: createMockStorage(),
+      crypto: globalThis.crypto.subtle,
+      generateId: createMockIdGenerator(),
+      logger,
+    });
+    await store.setSecret("key-ref", "sk-super-secret-value");
+    logger.debug.mockClear();
+
+    await store.getSecret("key-ref");
+
+    expect(logger.debug).toHaveBeenCalled();
+    const loggedText = logger.debug.mock.calls.flat().join(" ");
+    expect(loggedText).not.toContain("sk-super-secret-value");
+  });
+
+  it("logs a debug message when a secret is deleted", async () => {
+    const logger = makeSpyLogger();
+    const store = createSecureStore({
+      storage: createMockStorage(),
+      crypto: globalThis.crypto.subtle,
+      generateId: createMockIdGenerator(),
+      logger,
+    });
+    await store.setSecret("key-ref", "sk-super-secret-value");
+    logger.debug.mockClear();
+
+    await store.deleteSecret("key-ref");
+
+    expect(logger.debug).toHaveBeenCalled();
+  });
+
+  it("does not log anything when no logger is provided (default is safe)", async () => {
+    const store = createSecureStore({
+      storage: createMockStorage(),
+      crypto: globalThis.crypto.subtle,
+      generateId: createMockIdGenerator(),
+    });
+
+    await expect(store.setSecret("key-ref", "value")).resolves.toBeUndefined();
+  });
+});

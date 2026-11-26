@@ -10,6 +10,36 @@ import { isMessageOfKind, buildMessage } from "@shared/messages";
 import type { MessageOf, ExtractResultPayload, PickerResultPayload, SelectorPreviewResultPayload } from "@shared/messages";
 import { extract } from "./extractor/extract";
 import { createElementPicker } from "./element-picker";
+import { createLogger } from "@shared/logger";
+
+// ─── SF-8 debug logging ─────────────────────────────────────────────────────
+//
+// Cached at module load (best-effort — storage may be unavailable) and kept
+// current via the debugLoggingChanged message the background sends to every
+// tab on each settings save.
+
+let debugLoggingEnabled = false;
+// Set once a live message has told us the value: a slower storage read that
+// started earlier must not overwrite it with a stale one.
+let flagSetByMessage = false;
+const logger = createLogger({ getEnabled: () => debugLoggingEnabled });
+
+async function refreshDebugLoggingFlag(): Promise<void> {
+  try {
+    const synced = (await browser.storage.sync.get("settings")) as { settings?: { debugLogging?: boolean } };
+    if (flagSetByMessage) return;
+    if (typeof synced.settings?.debugLogging === "boolean") {
+      debugLoggingEnabled = synced.settings.debugLogging;
+      return;
+    }
+    const local = (await browser.storage.local.get("settings")) as { settings?: { debugLogging?: boolean } };
+    if (!flagSetByMessage && typeof local.settings?.debugLogging === "boolean") {
+      debugLoggingEnabled = local.settings.debugLogging;
+    }
+  } catch {
+    // Storage unavailable — default to disabled; never block content-script init.
+  }
+}
 
 // ─── Message Handlers ────────────────────────────────────────────────────────
 
@@ -25,6 +55,7 @@ async function handleExtractRequested(
   let payload: ExtractResultPayload;
 
   if (result.ok) {
+    logger.debug("Extraction succeeded", `confidence=${result.confidence}`, `chars=${result.article.bodyCharacterCount}`);
     payload = {
       ok: true,
       article: result.article,
@@ -32,6 +63,7 @@ async function handleExtractRequested(
       stalePattern: result.stalePattern,
     };
   } else {
+    logger.warn("Extraction failed", result.reason, result.detail);
     payload = {
       ok: false,
       reason: result.reason,
@@ -45,17 +77,20 @@ async function handleExtractRequested(
 async function handlePickerActivate(
   msg: MessageOf<"pickerActivate">,
 ): Promise<MessageOf<"pickerResult">> {
+  logger.debug("Picker activated");
   const picker = createElementPicker();
   const result = await picker.pick();
 
   let payload: PickerResultPayload;
   if (result) {
+    logger.debug("Picker selection made", result.selector);
     payload = {
       ok: true,
       selector: result.selector,
       previewText: result.previewText,
     };
   } else {
+    logger.debug("Picker cancelled");
     payload = {
       ok: false,
       reason: "Selection cancelled",
@@ -109,6 +144,14 @@ export function registerMessageListener(): void {
         return Promise.resolve(handleSelectorPreview(message));
       }
 
+      // SF-8: the background sends the new debug-logging flag to every tab on
+      // each settings save; refresh the cached flag, fire-and-forget.
+      if (isMessageOfKind(message, "debugLoggingChanged")) {
+        flagSetByMessage = true;
+        debugLoggingEnabled = message.payload.enabled;
+        return undefined;
+      }
+
       // Invalid or unrecognized messages are discarded silently.
       return undefined;
     },
@@ -118,3 +161,4 @@ export function registerMessageListener(): void {
 // ─── Initialize ──────────────────────────────────────────────────────────────
 
 registerMessageListener();
+void refreshDebugLoggingFlag();

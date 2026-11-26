@@ -11,6 +11,8 @@
 
 import type { StorageAdapter } from "@shared/storage";
 import { createLocalStorageAdapter } from "@shared/storage";
+import type { Logger } from "@shared/logger";
+import { noopLogger } from "@shared/logger";
 
 // ---------------------------------------------------------------------------
 // Public Interface
@@ -31,6 +33,7 @@ export interface CreateSecureStoreOptions {
   readonly storage?: StorageAdapter;
   readonly crypto?: SubtleCrypto;
   readonly generateId?: () => string;
+  readonly logger?: Logger;
 }
 
 // ---------------------------------------------------------------------------
@@ -61,6 +64,7 @@ export function createSecureStore(opts?: CreateSecureStoreOptions): SecureStore 
   const storage = opts?.storage ?? getDefaultStorage();
   const crypto = opts?.crypto ?? getDefaultCrypto();
   const generateId = opts?.generateId ?? defaultGenerateId;
+  const logger = opts?.logger ?? noopLogger;
 
   return {
     async setSecret(ref: string, value: string): Promise<void> {
@@ -92,6 +96,7 @@ export function createSecureStore(opts?: CreateSecureStoreOptions): SecureStore 
       };
 
       await storage.set(STORAGE_PREFIX + ref, entry);
+      logger.debug("Secret saved", `ref=${ref}`);
     },
 
     async getSecret(ref: string): Promise<string | null> {
@@ -116,11 +121,13 @@ export function createSecureStore(opts?: CreateSecureStoreOptions): SecureStore 
         ct,
       );
 
+      logger.debug("Secret retrieved", `ref=${ref}`);
       return new TextDecoder().decode(plainBuffer);
     },
 
     async deleteSecret(ref: string): Promise<void> {
       await storage.remove(STORAGE_PREFIX + ref);
+      logger.debug("Secret deleted", `ref=${ref}`);
     },
 
     createRef(): string {

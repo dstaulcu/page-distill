@@ -60,6 +60,9 @@ describe("markdown rendering basics", () => {
 
   it("renders headings", () => {
     expect(renderMarkdown("## Key Points")).toContain("<h3>Key Points</h3>");
+    expect(renderMarkdown("#### Findings")).toContain("<h5>Findings</h5>");
+    expect(renderMarkdown("###### Deep")).toContain("<h6>Deep</h6>");
+    expect(renderMarkdown("#### Findings")).not.toContain("####");
   });
 
   it("renders bullet lists", () => {
@@ -88,5 +91,80 @@ describe("markdown rendering basics", () => {
     expect(html.match(/<ul>/g)?.length).toBe(1);
     expect(html.match(/<\/ul>/g)?.length).toBe(1);
     expect(html).not.toContain("<br>");
+  });
+});
+
+describe("markdown rendering — extended syntax", () => {
+  it("renders numbered lists as a single <ol>, even with blank lines between items", () => {
+    const html = renderMarkdown("1. First\n\n2. Second\n3. Third");
+    expect(html).toContain("<ol><li>First</li><li>Second</li><li>Third</li></ol>");
+    expect(html).not.toContain("<br>");
+  });
+
+  it("keeps bullet and numbered lists separate", () => {
+    const html = renderMarkdown("- a\n- b\n\n1. x\n2. y");
+    expect(html).toContain("<ul><li>a</li><li>b</li></ul>");
+    expect(html).toContain("<ol><li>x</li><li>y</li></ol>");
+  });
+
+  it("renders blockquotes, escaping their content", () => {
+    const html = renderMarkdown("> quoted <b>x</b>\n> second");
+    expect(html).toContain("<blockquote>quoted &lt;b&gt;x&lt;/b&gt;<br>second</blockquote>");
+    expect(html).not.toContain("<p><blockquote>");
+  });
+
+  it("renders horizontal rules", () => {
+    const html = renderMarkdown("above\n\n---\n\nbelow");
+    expect(html).toContain("<hr>");
+    expect(html).not.toContain("<p><hr>");
+  });
+
+  it("renders pipe tables with a header row and inline formatting in cells", () => {
+    const html = renderMarkdown("| Name | Value |\n|------|:-----:|\n| **a** | 1 |\n| b | 2 |");
+    expect(html).toContain("<table><thead><tr><th>Name</th><th>Value</th></tr></thead>");
+    expect(html).toContain("<tbody><tr><td><strong>a</strong></td><td>1</td></tr><tr><td>b</td><td>2</td></tr></tbody></table>");
+    expect(html).not.toContain("<p><table>");
+  });
+
+  it("does not treat a lone pipe line as a table", () => {
+    const html = renderMarkdown("a | b");
+    expect(html).not.toContain("<table>");
+  });
+
+  it("escapes HTML inside table cells", () => {
+    const html = renderMarkdown("| h |\n|---|\n| <script>x</script> |");
+    expect(html).not.toContain("<script>");
+    expect(html).toContain("&lt;script&gt;");
+  });
+
+  it("does not reinterpret code contents as markdown", () => {
+    const html = renderMarkdown("```\n- not a list\n**not bold** snake_case_name\n```\n\nuse `a_b_c` here");
+    expect(html).toContain("- not a list");
+    expect(html).toContain("**not bold** snake_case_name");
+    expect(html).not.toContain("<li>");
+    expect(html).toContain("<code>a_b_c</code>");
+    expect(html).not.toContain("<em>");
+  });
+
+  it("leaves snake_case words and underscores in link URLs alone", () => {
+    const html = renderMarkdown("the my_var_name field, see [doc](https://example.com/a_b_c)");
+    expect(html).not.toContain("<em>");
+    expect(html).toContain('href="https://example.com/a_b_c"');
+  });
+
+  it("still renders word-bounded _italic_ and __bold__", () => {
+    expect(renderMarkdown("an _idea_ here")).toContain("<em>idea</em>");
+    expect(renderMarkdown("a __bold__ move")).toContain("<strong>bold</strong>");
+  });
+
+  it("cannot be tricked into restoring forged placeholders", () => {
+    const html = renderMarkdown("`x` \u00000\u0000");
+    expect(html).toContain("<code>x</code>");
+    expect(html.match(/<code>/g)).toHaveLength(1);
+  });
+
+  it("does not wrap h5/h6 headings in paragraphs", () => {
+    expect(renderMarkdown("#### Findings")).not.toContain("<p><h5>");
+    expect(renderMarkdown("###### Deep")).not.toContain("<p>");
   });
 });

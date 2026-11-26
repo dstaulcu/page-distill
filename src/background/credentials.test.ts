@@ -13,10 +13,10 @@ import type { Settings } from "@shared/types";
 function makeSettings(overrides?: Partial<Settings["ai"]>): Settings {
   return {
     schemaVersion: 1,
-    ai: { baseUrl: "http://localhost:11434", modelId: "llama3", apiKeyRef: null, systemPrompt: "", ...overrides },
+    ai: { provider: "openai-compatible", baseUrl: "http://localhost:11434", modelId: "llama3", apiKeyRef: null, systemPrompt: "", contextWindowTokens: 8192, ...overrides },
     export: { filenamePattern: "YYYY-MM-DD-slugified-title", defaultDestination: { kind: "download" }, frontmatterFields: ["title"] },
     sitePatterns: [],
-    autoExportConfigs: [],
+    debugLogging: false,
   };
 }
 
@@ -154,5 +154,51 @@ describe("CF-5.3 API key resolution (resolveApiKey)", () => {
 
     const resolved = await resolveApiKey({ settings, secureStore });
     expect(resolved).toBeNull();
+  });
+});
+
+describe("SF-8 logging", () => {
+  function makeSpyLogger() {
+    return { debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
+  }
+
+  it("logs a debug message on a successful save, without logging the key value", async () => {
+    const logger = makeSpyLogger();
+    const secureStore = makeSecureStore();
+    const settings = makeSettings();
+    const updateSettings = vi.fn(async () => ({ ok: true as const, settings }));
+
+    const save = createApiKeySaver({ getSettings: async () => settings, updateSettings, secureStore, logger });
+    await save("sk-super-secret-value");
+
+    expect(logger.debug).toHaveBeenCalled();
+    const loggedText = logger.debug.mock.calls.flat().join(" ");
+    expect(loggedText).not.toContain("sk-super-secret-value");
+  });
+
+  it("logs a warn when the settings update fails and the secret is rolled back", async () => {
+    const logger = makeSpyLogger();
+    const secureStore = makeSecureStore();
+    const settings = makeSettings();
+    const updateSettings = vi.fn(async () => ({
+      ok: false as const,
+      reason: "validation-failed" as const,
+      errors: [{ field: "ai.apiKeyRef", message: "bad" }],
+    }));
+
+    const save = createApiKeySaver({ getSettings: async () => settings, updateSettings, secureStore, logger });
+    const result = await save("sk-test-123");
+
+    expect(result.ok).toBe(false);
+    expect(logger.warn).toHaveBeenCalled();
+  });
+
+  it("does not log anything when no logger is provided (default is safe)", async () => {
+    const secureStore = makeSecureStore();
+    const settings = makeSettings();
+    const updateSettings = vi.fn(async () => ({ ok: true as const, settings }));
+
+    const save = createApiKeySaver({ getSettings: async () => settings, updateSettings, secureStore });
+    await expect(save("sk-test-123")).resolves.toEqual(expect.objectContaining({ ok: true }));
   });
 });

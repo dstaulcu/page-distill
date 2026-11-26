@@ -12,7 +12,7 @@ body:
 
         Your installed version is shown in the sidebar's **❓ Help** menu.
         The latest release is listed at
-        https://github.com/dstaulcu/distill/releases
+        https://github.com/dstaulcu/page-distill/releases
 
   - type: input
     id: version

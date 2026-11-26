@@ -94,10 +94,12 @@ function makeSettings(): Settings {
   return {
     schemaVersion: 1,
     ai: {
+      provider: "openai-compatible",
       baseUrl: "https://api.example.com",
       modelId: "gpt-4",
       apiKeyRef: null,
       systemPrompt: "Summarize.",
+      contextWindowTokens: 8192,
     },
     export: {
       filenamePattern: "YYYY-MM-DD-slugified-title",
@@ -105,7 +107,7 @@ function makeSettings(): Settings {
       frontmatterFields: ["title", "source_url", "capture_date"],
     },
     sitePatterns: [],
-    autoExportConfigs: [],
+    debugLogging: false,
   };
 }
 

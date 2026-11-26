@@ -38,10 +38,12 @@ function makeSettings(overrides?: Partial<Settings["export"]>): Settings {
   return {
     schemaVersion: 1,
     ai: {
+      provider: "openai-compatible",
       baseUrl: "https://api.example.com",
       modelId: "gpt-4",
       apiKeyRef: null,
       systemPrompt: "Summarize this article.",
+      contextWindowTokens: 8192,
     },
     export: {
       filenamePattern: "YYYY-MM-DD-slugified-title",
@@ -50,7 +52,7 @@ function makeSettings(overrides?: Partial<Settings["export"]>): Settings {
       ...overrides,
     },
     sitePatterns: [],
-    autoExportConfigs: [],
+    debugLogging: false,
   };
 }
 
@@ -560,5 +562,131 @@ describe("CF-4 Export Manager", () => {
       expect(downloadCall.content).toContain("title:");
       expect(downloadCall.content).toContain("capture_date:");
     });
+  });
+});
+
+describe("SF-8 logging", () => {
+  function makeSpyLogger() {
+    return { debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
+  }
+
+  it("logs a debug message on a successful export", async () => {
+    const logger = makeSpyLogger();
+    const opts = makeOpts({ logger });
+    const manager = createExportManager(opts);
+
+    const result = await manager.export({ tabId: 1, includeQA: false, destinations: [{ kind: "download" }] });
+
+    expect(result.ok).toBe(true);
+    expect(logger.debug).toHaveBeenCalled();
+  });
+
+  it("logs a warn when extraction fails", async () => {
+    const logger = makeSpyLogger();
+    const opts = makeOpts({ logger, extractContent: vi.fn().mockResolvedValue(makeExtractionFailure()) });
+    const manager = createExportManager(opts);
+
+    const result = await manager.export({ tabId: 1, includeQA: false, destinations: [{ kind: "download" }] });
+
+    expect(result.ok).toBe(false);
+    expect(logger.warn).toHaveBeenCalled();
+  });
+
+  it("logs a warn when a destination delivery fails", async () => {
+    const logger = makeSpyLogger();
+    const opts = makeOpts({
+      logger,
+      deliverToDownload: vi.fn().mockResolvedValue({ ok: false, reason: "download-failed", detail: "disk full" }),
+    });
+    const manager = createExportManager(opts);
+
+    const result = await manager.export({ tabId: 1, includeQA: false, destinations: [{ kind: "download" }] });
+
+    expect(result.ok).toBe(true); // export() itself succeeds; the per-destination outcome failed
+    expect(logger.warn).toHaveBeenCalled();
+  });
+
+  it("does not log anything when no logger is provided (default is safe)", async () => {
+    const opts = makeOpts();
+    const manager = createExportManager(opts);
+
+    await expect(
+      manager.export({ tabId: 1, includeQA: false, destinations: [{ kind: "download" }] }),
+    ).resolves.toEqual(expect.objectContaining({ ok: true }));
+  });
+});
+
+describe("CF-4 export sections: summary, content, Q&A are chosen independently", () => {
+  const conversation = makeConversation([
+    { role: "assistant", content: "THE_SUMMARY", timestamp: "2024-01-15T10:00:00Z" },
+    { role: "user", content: "A_QUESTION", timestamp: "2024-01-15T10:01:00Z" },
+    { role: "assistant", content: "AN_ANSWER", timestamp: "2024-01-15T10:02:00Z" },
+  ]);
+
+  async function exportWith(flags: { includeSummary?: boolean; includeContent?: boolean; includeQA: boolean }) {
+    const opts = makeOpts({ getConversation: vi.fn().mockReturnValue(conversation) });
+    const manager = createExportManager(opts);
+    const result = await manager.export({ tabId: 1, destinations: [{ kind: "download" }], ...flags });
+    const deliver = opts.deliverToDownload as ReturnType<typeof vi.fn>;
+    const doc = deliver.mock.calls.length > 0 ? (deliver.mock.calls[0][0] as DownloadInput).content : null;
+    return { result, doc, deliver };
+  }
+
+  it("summary only: frontmatter + Summary, no Content and no Q&A", async () => {
+    const { result, doc } = await exportWith({ includeSummary: true, includeContent: false, includeQA: false });
+    expect(result.ok).toBe(true);
+    expect(doc).toContain("## Summary");
+    expect(doc).toContain("THE_SUMMARY");
+    expect(doc).not.toContain("## Content");
+    expect(doc).not.toContain("This is the article body content.");
+    expect(doc).not.toContain("## Q&A");
+  });
+
+  it("content only: no Summary, no Q&A", async () => {
+    const { doc } = await exportWith({ includeSummary: false, includeContent: true, includeQA: false });
+    expect(doc).toContain("## Content");
+    expect(doc).toContain("This is the article body content.");
+    expect(doc).not.toContain("## Summary");
+    expect(doc).not.toContain("THE_SUMMARY");
+    expect(doc).not.toContain("## Q&A");
+  });
+
+  it("Q&A only: just the follow-up exchange, not the summary or the content", async () => {
+    const { doc } = await exportWith({ includeSummary: false, includeContent: false, includeQA: true });
+    expect(doc).toContain("## Q&A");
+    expect(doc).toContain("A_QUESTION");
+    expect(doc).toContain("AN_ANSWER");
+    expect(doc).not.toContain("THE_SUMMARY");
+    expect(doc).not.toContain("## Content");
+  });
+
+  it("all three together: every section is present", async () => {
+    const { doc } = await exportWith({ includeSummary: true, includeContent: true, includeQA: true });
+    expect(doc).toContain("## Summary");
+    expect(doc).toContain("## Q&A");
+    expect(doc).toContain("## Content");
+  });
+
+  it("callers that don't say anything about content still get it (back-compat)", async () => {
+    const { doc } = await exportWith({ includeSummary: false, includeQA: false });
+    expect(doc).toContain("## Content");
+  });
+
+  it("nothing selected → fails with nothing-to-export and delivers nothing", async () => {
+    const { result, deliver } = await exportWith({ includeSummary: false, includeContent: false, includeQA: false });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("nothing-to-export");
+    expect(deliver).not.toHaveBeenCalled();
+  });
+
+  it("only sections that are empty selected (summary requested, none exists yet) → nothing-to-export, not a frontmatter-only file", async () => {
+    const opts = makeOpts(); // no conversation
+    const manager = createExportManager(opts);
+    const result = await manager.export({
+      tabId: 1, includeSummary: true, includeContent: false, includeQA: false, destinations: [{ kind: "download" }],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("nothing-to-export");
+    expect((opts.deliverToDownload as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
   });
 });

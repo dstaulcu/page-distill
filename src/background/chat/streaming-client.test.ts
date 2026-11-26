@@ -202,6 +202,36 @@ describe("CF-2.2 createStreamingClient", () => {
       expect(body.options).toBeUndefined();
     });
 
+    it("CF-5.7 provider \"ollama\" sends num_ctx even for a remote host on a custom port", async () => {
+      let capturedInit: RequestInit | undefined;
+      const mockFetch: typeof globalThis.fetch = async (_url, init) => {
+        capturedInit = init;
+        return new Response(createSSEStream(["data: [DONE]\n\n"]), { status: 200 });
+      };
+
+      const client = createStreamingClient(
+        makeOptions({ baseUrl: "https://ollama.mycorp.example", provider: "ollama", contextWindowTokens: 16_000, fetch: mockFetch }),
+      );
+      await client.streamChatCompletion(makeRequest());
+
+      expect(JSON.parse(capturedInit?.body as string).options).toEqual({ num_ctx: 16_000 });
+    });
+
+    it("CF-5.7 provider \"openai-compatible\" never sends num_ctx, even for a localhost server (LM Studio, vLLM, llama.cpp)", async () => {
+      let capturedInit: RequestInit | undefined;
+      const mockFetch: typeof globalThis.fetch = async (_url, init) => {
+        capturedInit = init;
+        return new Response(createSSEStream(["data: [DONE]\n\n"]), { status: 200 });
+      };
+
+      const client = createStreamingClient(
+        makeOptions({ baseUrl: "http://localhost:1234", provider: "openai-compatible", fetch: mockFetch }),
+      );
+      await client.streamChatCompletion(makeRequest());
+
+      expect(JSON.parse(capturedInit?.body as string).options).toBeUndefined();
+    });
+
     it("adds an Ollama num_ctx override when baseUrl is localhost", async () => {
       let capturedInit: RequestInit | undefined;
       const mockFetch: typeof globalThis.fetch = async (_url, init) => {
@@ -238,6 +268,36 @@ describe("CF-2.2 createStreamingClient", () => {
       };
 
       const client = createStreamingClient(makeOptions({ baseUrl: "http://ollama.internal.lan:11434", fetch: mockFetch }));
+      await client.streamChatCompletion(makeRequest());
+
+      const body = JSON.parse(capturedInit?.body as string);
+      expect(body.options).toEqual({ num_ctx: 8192 });
+    });
+
+    it("CF-5.6 uses the configured contextWindowTokens for the Ollama num_ctx override instead of the fixed default", async () => {
+      let capturedInit: RequestInit | undefined;
+      const mockFetch: typeof globalThis.fetch = async (_url, init) => {
+        capturedInit = init;
+        return new Response(createSSEStream(["data: [DONE]\n\n"]), { status: 200 });
+      };
+
+      const client = createStreamingClient(
+        makeOptions({ baseUrl: "http://localhost:11434", fetch: mockFetch, contextWindowTokens: 32_000 }),
+      );
+      await client.streamChatCompletion(makeRequest());
+
+      const body = JSON.parse(capturedInit?.body as string);
+      expect(body.options).toEqual({ num_ctx: 32_000 });
+    });
+
+    it("CF-5.6 falls back to 8192 for num_ctx when contextWindowTokens is not provided", async () => {
+      let capturedInit: RequestInit | undefined;
+      const mockFetch: typeof globalThis.fetch = async (_url, init) => {
+        capturedInit = init;
+        return new Response(createSSEStream(["data: [DONE]\n\n"]), { status: 200 });
+      };
+
+      const client = createStreamingClient(makeOptions({ baseUrl: "http://localhost:11434", fetch: mockFetch }));
       await client.streamChatCompletion(makeRequest());
 
       const body = JSON.parse(capturedInit?.body as string);
@@ -686,6 +746,53 @@ describe("CF-2.2 createStreamingClient", () => {
       await client.streamChatCompletion(makeRequest({ signal: controller.signal }));
 
       expect(capturedSignal).toBe(controller.signal);
+    });
+  });
+
+  describe("SF-8 logging", () => {
+    function makeSpyLogger() {
+      return { debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    }
+
+    it("logs the applied num_ctx value for an Ollama-like endpoint", async () => {
+      const logger = makeSpyLogger();
+      const client = createStreamingClient(
+        makeOptions({ baseUrl: "http://localhost:11434", fetch: createMockFetch(200, ["data: [DONE]\n\n"]), contextWindowTokens: 32_000, logger }),
+      );
+      await client.streamChatCompletion(makeRequest());
+
+      expect(logger.debug).toHaveBeenCalled();
+      const loggedArgs = logger.debug.mock.calls.flat();
+      expect(loggedArgs).toContain(32_000);
+    });
+
+    it("logs a warn on a non-2xx response", async () => {
+      vi.useRealTimers();
+      const logger = makeSpyLogger();
+      const client = createStreamingClient(makeOptions({ fetch: createMockFetch(500, []), logger }));
+
+      await client.streamChatCompletion(makeRequest());
+
+      expect(logger.warn).toHaveBeenCalled();
+    });
+
+    it("logs a warn on a network error", async () => {
+      const logger = makeSpyLogger();
+      const failingFetch: typeof globalThis.fetch = async () => {
+        throw new Error("Network unreachable");
+      };
+      const client = createStreamingClient(makeOptions({ fetch: failingFetch, logger }));
+
+      await client.streamChatCompletion(makeRequest());
+
+      expect(logger.warn).toHaveBeenCalled();
+    });
+
+    it("does not log anything when no logger is provided (default is safe)", async () => {
+      const client = createStreamingClient(makeOptions({ fetch: createMockFetch(200, ["data: [DONE]\n\n"]) }));
+      await expect(client.streamChatCompletion(makeRequest())).resolves.toEqual(
+        expect.objectContaining({ ok: true }),
+      );
     });
   });
 });

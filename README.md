@@ -3,7 +3,7 @@
 A Firefox extension (Manifest V3) that extracts web page content, generates AI summaries via a sidebar, supports follow-up Q&A chat with streaming responses, and exports unified Markdown documents.
 
 > Installed version is shown in the sidebar's ❓ Help menu; the current release is always
-> [on GitHub](https://github.com/dstaulcu/distill/releases). This README intentionally
+> [on GitHub](https://github.com/dstaulcu/page-distill/releases). This README intentionally
 > doesn't hardcode a version number so it can't go stale.
 
 ## Features
@@ -11,8 +11,7 @@ A Firefox extension (Manifest V3) that extracts web page content, generates AI s
 - **AI-Powered Summarization** — Automatically summarizes the active page when the sidebar opens, with structured output (Findings, Key Points, Action Items)
 - **Follow-up Q&A Chat** — Ask questions about the page content with full conversation context and streaming token delivery
 - **Content Extraction** — Smart heuristic detection via `@mozilla/readability` with manual element picker recovery
-- **Markdown Export** — Unified documents combining frontmatter, summary, Q&A, and cleaned page content
-- **Auto-Export Scheduling** — Periodic content capture for configured sites using `browser.alarms`
+- **Markdown Export** — Frontmatter plus the sections you tick: summary (default), cleaned page content, and the follow-up Q&A
 - **Site Patterns** — Configurable CSS selectors per-site for reliable extraction across different layouts
 - **API Key Storage** — keys live outside settings, AES-GCM obfuscated at rest in `browser.storage.local` (protects against casual inspection of storage dumps; the encryption key itself is stored locally, so this is not protection against code with storage access)
 
@@ -53,12 +52,13 @@ After installing, open the extension's Settings page (right-click toolbar icon �
 
 | Setting | Description |
 |---------|-------------|
-| AI Base URL | OpenAI-compatible endpoint (e.g., `https://api.openai.com`) |
+| AI Provider | `Ollama` (default) or `OpenAI-compatible`. Ollama gets the `num_ctx` override and prompt budgeting; OpenAI-compatible servers (OpenAI, LM Studio, vLLM, llama.cpp, gateways) never do. Settings saved before providers existed are migrated from their URL (localhost / port 11434 → Ollama, anything else → OpenAI-compatible) |
+| AI Base URL | Server root, e.g. `http://localhost:11434` (Ollama) or `https://api.openai.com`. Both providers use `<base>/v1/chat/completions` |
+| Context Window | Ollama only: the model's real window in tokens (512–10,000,000, default 8192) |
 | Model ID | Model identifier (e.g., `gpt-4`, `gpt-4o`) |
 | API Key | Encrypted at rest via AES-GCM SecureStore |
 | Filename Pattern | Tokens: `YYYY`, `MM`, `DD`, `slugified-title` |
 | Site Patterns | URL match patterns + CSS content selectors (max 50) |
-| Auto-Export | Per-origin interval (1–120 min), destination, mode; change detection via FNV-1a hash of the full exported content |
 
 ## Architecture
 
@@ -103,7 +103,6 @@ graph TB
         FG[Filename Generator]
         SPM[Site Pattern Matcher]
         TS[Tab State Manager]
-        AES[Auto Export Scheduler]
     end
 
     subgraph "Content Script"
@@ -137,7 +136,6 @@ graph TB
     SM --> BS
     SS --> BS
     TS -.->|"in-memory Map"| TS
-    AES -.->|"browser.alarms"| AES
     CE --> RW
     CE --> MC
     CE --> ME
@@ -192,7 +190,7 @@ sequenceDiagram
     participant ContentScript
 
     User->>Sidebar: Clicks Export
-    Sidebar->>Background: exportRequested { destinations, includeQA }
+    Sidebar->>Background: exportRequested { destinations, includeSummary, includeContent, includeQA }
     Background->>ContentScript: extractRequested { tabId }
     ContentScript->>Background: extractResult { article }
     Background->>Background: Assemble: frontmatter → summary → Q&A → content
@@ -209,44 +207,6 @@ sequenceDiagram
     Background->>Sidebar: exportResult { outcomes, filename }
 ```
 
-### Process View: Auto-Export Scheduling
-
-```mermaid
-sequenceDiagram
-    participant TabEvents as browser.tabs
-    participant Background
-    participant Scheduler as Auto Export Scheduler
-    participant Alarms as browser.alarms
-    participant ContentScript
-    participant Export as Export Pipeline
-
-    Note over Background: Tab loads page with configured origin
-    TabEvents->>Background: onUpdated { status: "complete", url }
-    Background->>Scheduler: scheduleForTab(tabId, origin)
-    Scheduler->>Alarms: alarms.create("auto-export-${tabId}", { periodInMinutes })
-
-    Note over Alarms: Alarm fires at configured interval
-    Alarms->>Scheduler: onAlarm { name }
-    Scheduler->>ContentScript: extractContent(tabId)
-    ContentScript->>Scheduler: extractResult { article }
-
-    alt "skip if unchanged" enabled
-        Scheduler->>Scheduler: hashContent(body) → compare
-        alt Content changed
-            Scheduler->>Export: export(article, config)
-        else Unchanged
-            Scheduler->>Scheduler: Skip, update status
-        end
-    else Always export
-        Scheduler->>Export: export(article, config)
-    end
-
-    Note over TabEvents: Navigation away or tab close
-    TabEvents->>Background: onUpdated/onRemoved
-    Background->>Scheduler: cancelForTab(tabId)
-    Scheduler->>Alarms: alarms.clear("auto-export-${tabId}")
-```
-
 ### Deployment View: Extension Contexts
 
 ```mermaid
@@ -257,7 +217,6 @@ graph LR
             BG --- CC[chat/controller]
             BG --- SM[settings/manager]
             BG --- EM[export/manager]
-            BG --- AES[auto-export/scheduler]
             BG --- SS[secure-store]
         end
 
@@ -326,7 +285,6 @@ src/
 ├── background/           # Persistent background script
 │   ├── main.ts           # Entry point, message routing, event wiring
 │   ├── ai/              # Non-streaming AI client (connection test)
-│   ├── auto-export/     # Scheduler, hasher, filename generator
 │   ├── chat/            # Chat controller, streaming SSE client
 │   ├── export/          # Export manager (document assembly)
 │   ├── render/          # Frontmatter renderer, filename generator
@@ -392,9 +350,8 @@ npx vitest run src/background/chat/controller.test.ts
 npx vitest run prop.test
 ```
 
-Intended behavior is specified in [`REQUIREMENTS.md`](REQUIREMENTS.md) — core-feature tests
-reference its CF-x acceptance criteria in their `describe` names, which is what makes the
-regression filter (`vitest run -t CF-`) work.
+Core-feature tests carry their CF-x feature ID in their `describe` names, which is what makes
+the regression filter (`vitest run -t CF-`) work.
 
 ## License
 

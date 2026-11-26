@@ -4,9 +4,9 @@
 > the controller now re-reads active skills per request, so options-page library changes
 > apply immediately; a live push to an open sidebar's dropdown remains a known limitation).
 > Every fix is pinned by tests; the regression suite is `npm run test:regression`.
-> This document is retained as the point-in-time Phase 2 audit record.
+> This document is retained as the point-in-time Phase 2 audit record. Since then, SF-2's persona wording, SF-3 (skills, personas), SF-4 (auto-export) and SF-5 (bot avatar) have been removed from the product; references to them below are historical.
 
-> Produced 2026-07-04 against the confirmed `REQUIREMENTS.md`. Baseline suite status:
+> Produced 2026-07-04 against the then-current requirements document (since removed). Baseline suite status:
 > **54 files / 825 tests / 0 failures** (`npm test`, ~71 s). Every defect below survives a
 > fully passing suite — the gaps in the coverage map explain why.
 
@@ -40,7 +40,7 @@ single file in the project), `background/main.ts` (~700 lines of wiring and orch
 
 ## 2. Defect list (ranked)
 
-IDs are stable for Phase 3 tracking. Each maps to a REQUIREMENTS.md criterion and, where
+IDs are stable for Phase 3 tracking. Each maps to a CF-/SF- feature criterion and, where
 applicable, the interview decision (Qn).
 
 ### Critical — core feature broken or security

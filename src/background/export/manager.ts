@@ -9,6 +9,8 @@ import type { ExportDestination, Settings, Conversation, ExtractedArticle } from
 import type { ExtractionResult } from "@content/extractor/extract";
 import { renderFrontmatter } from "@background/render/frontmatter";
 import { generateFilename } from "@background/render/filename";
+import type { Logger } from "@shared/logger";
+import { noopLogger } from "@shared/logger";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -20,14 +22,18 @@ export interface ExportManager {
 
 export interface ExportRequest {
   readonly tabId: number;
+  /** Include the AI summary (default true when omitted). */
   readonly includeSummary?: boolean;
+  /** Include the cleaned page content (default true when omitted, for older callers). */
+  readonly includeContent?: boolean;
+  /** Include the follow-up Q&A exchange. */
   readonly includeQA: boolean;
   readonly destinations: ReadonlyArray<ExportDestination>;
 }
 
 export type ExportResult =
   | { readonly ok: true; readonly filename: string; readonly outcomes: ReadonlyArray<DestinationOutcome> }
-  | { readonly ok: false; readonly reason: "filename-invalid" | "frontmatter-invalid" | "extraction-failed"; readonly detail: string };
+  | { readonly ok: false; readonly reason: "filename-invalid" | "frontmatter-invalid" | "extraction-failed" | "nothing-to-export"; readonly detail: string };
 
 export type DestinationOutcome =
   | { readonly destination: ExportDestination; readonly ok: true }
@@ -53,6 +59,7 @@ export interface CreateExportManagerOptions {
   readonly deliverToDownload?: (input: DownloadInput) => Promise<DownloadResult>;
   readonly deliverToClipboard?: (content: string) => Promise<ClipboardResult>;
   readonly getCaptureDate?: () => Date;
+  readonly logger?: Logger;
 }
 
 // ---------------------------------------------------------------------------
@@ -67,6 +74,7 @@ export function createExportManager(opts: CreateExportManagerOptions): ExportMan
     deliverToDownload = defaultDeliverToDownload,
     deliverToClipboard = defaultDeliverToClipboard,
     getCaptureDate = () => new Date(),
+    logger = noopLogger,
   } = opts;
 
   return {
@@ -74,6 +82,7 @@ export function createExportManager(opts: CreateExportManagerOptions): ExportMan
       // 1. Extract content from the tab
       const extractionResult = await extractContent(req.tabId);
       if (!extractionResult.ok) {
+        logger.warn("Export failed: extraction failed for tab", req.tabId, extractionResult.reason, extractionResult.detail);
         return {
           ok: false,
           reason: "extraction-failed",
@@ -93,6 +102,7 @@ export function createExportManager(opts: CreateExportManagerOptions): ExportMan
       });
 
       if (!frontmatterResult.ok) {
+        logger.warn("Export failed: frontmatter invalid", frontmatterResult.detail);
         return {
           ok: false,
           reason: "frontmatter-invalid",
@@ -108,6 +118,7 @@ export function createExportManager(opts: CreateExportManagerOptions): ExportMan
       });
 
       if (!filenameResult.ok) {
+        logger.warn("Export failed: filename invalid", filenameResult.detail);
         return {
           ok: false,
           reason: "filename-invalid",
@@ -117,11 +128,27 @@ export function createExportManager(opts: CreateExportManagerOptions): ExportMan
 
       // 4. Assemble the document
       const includeSummary = req.includeSummary !== false;
+      const includeContent = req.includeContent !== false;
+      const summary = includeSummary ? getSummary(req.tabId, getConversation) : null;
+      const qaMessages = req.includeQA ? getQAMessages(req.tabId, getConversation) : null;
+      const content = includeContent ? article.bodyMarkdown : null;
+
+      // A document with only frontmatter is useless: if every selected section
+      // is empty (or none was selected), say so instead of exporting it.
+      if (!summary && !(qaMessages && qaMessages.length > 0) && content === null) {
+        logger.warn("Export failed: nothing to export for the selected sections");
+        return {
+          ok: false,
+          reason: "nothing-to-export",
+          detail: "Nothing to export — the selected sections are empty.",
+        };
+      }
+
       const markdown = assembleDocument({
         frontmatter: frontmatterResult.yaml,
-        summary: includeSummary ? getSummary(req.tabId, getConversation) : null,
-        qaMessages: req.includeQA ? getQAMessages(req.tabId, getConversation) : null,
-        content: article.bodyMarkdown,
+        summary,
+        qaMessages,
+        content,
       });
 
       // 5. Dispatch to each destination independently
@@ -131,7 +158,10 @@ export function createExportManager(opts: CreateExportManagerOptions): ExportMan
         content: markdown,
         deliverToDownload,
         deliverToClipboard,
+        logger,
       });
+
+      logger.debug("Export succeeded", filenameResult.filename, `destinations=${req.destinations.map((d) => d.kind).join(",")}`);
 
       return {
         ok: true,
@@ -150,7 +180,7 @@ interface AssembleDocumentInput {
   readonly frontmatter: string;
   readonly summary: string | null;
   readonly qaMessages: ReadonlyArray<{ role: "user" | "assistant"; content: string }> | null;
-  readonly content: string;
+  readonly content: string | null;
 }
 
 function assembleDocument(input: AssembleDocumentInput): string {
@@ -177,8 +207,10 @@ function assembleDocument(input: AssembleDocumentInput): string {
     parts.push(qaLines.join(""));
   }
 
-  // Content section (always present)
-  parts.push(`\n## Content\n\n${input.content}\n`);
+  // Content section (only when included)
+  if (input.content !== null) {
+    parts.push(`\n## Content\n\n${input.content}\n`);
+  }
 
   return parts.join("");
 }
@@ -241,10 +273,11 @@ interface DispatchInput {
   readonly content: string;
   readonly deliverToDownload: (input: DownloadInput) => Promise<DownloadResult>;
   readonly deliverToClipboard: (content: string) => Promise<ClipboardResult>;
+  readonly logger: Logger;
 }
 
 async function dispatchToDestinations(input: DispatchInput): Promise<ReadonlyArray<DestinationOutcome>> {
-  const { destinations, filename, content, deliverToDownload, deliverToClipboard } = input;
+  const { destinations, filename, content, deliverToDownload, deliverToClipboard, logger } = input;
 
   const outcomes = await Promise.all(
     destinations.map(async (destination): Promise<DestinationOutcome> => {
@@ -253,6 +286,7 @@ async function dispatchToDestinations(input: DispatchInput): Promise<ReadonlyArr
         if (result.ok) {
           return { destination, ok: true };
         }
+        logger.warn("Export delivery to download failed", result.reason, result.detail);
         return { destination, ok: false, reason: result.reason, detail: result.detail };
       }
 
@@ -261,6 +295,7 @@ async function dispatchToDestinations(input: DispatchInput): Promise<ReadonlyArr
         if (result.ok) {
           return { destination, ok: true };
         }
+        logger.warn("Export delivery to clipboard failed", result.reason, result.detail);
         return { destination, ok: false, reason: result.reason, detail: result.detail };
       }
 

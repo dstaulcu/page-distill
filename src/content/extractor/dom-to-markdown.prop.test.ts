@@ -234,7 +234,8 @@ describe("Property 10: Markdown converter element type preservation", () => {
         expect(result.markdown).not.toContain(`<${tag}`);
         expect(result.markdown).not.toContain(`</${tag}>`);
         // But should contain the text content
-        expect(result.markdown).toContain(text);
+        // The converter collapses runs of whitespace (Property 9), so compare normalized text.
+        expect(result.markdown).toContain(text.replace(/\s+/g, " "));
       }),
       { numRuns: 100 },
     );
@@ -263,7 +264,8 @@ describe("Property 10: Markdown converter element type preservation", () => {
             expect(result.markdown).not.toContain(`</${tag}>`);
           }
           // Text content should be preserved
-          expect(result.markdown).toContain(text);
+          // The converter collapses runs of whitespace (Property 9), so compare normalized text.
+          expect(result.markdown).toContain(text.replace(/\s+/g, " "));
         },
       ),
       { numRuns: 100 },

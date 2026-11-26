@@ -5,6 +5,12 @@
  * a configurable token timeout. Uses dependency injection for fetch.
  */
 
+import { DEFAULT_CONTEXT_WINDOW_TOKENS } from "./context-budget";
+import type { AiProvider } from "@shared/types";
+import { isOllamaLikeEndpoint } from "@shared/providers";
+import type { Logger } from "@shared/logger";
+import { noopLogger } from "@shared/logger";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -38,8 +44,16 @@ export interface StreamingAiClient {
 export interface StreamingClientOptions {
   readonly baseUrl: string;
   readonly apiKey: string;
+  /**
+   * Server kind (CF-5.7). "ollama" gets the num_ctx override; "openai-compatible"
+   * never does. When omitted, it is inferred from the base URL (legacy callers).
+   */
+  readonly provider?: AiProvider;
   readonly tokenTimeoutMs?: number; // Default: 30_000
   readonly fetch?: typeof globalThis.fetch;
+  /** Model's context window in tokens (CF-5.6); sourced from settings.ai.contextWindowTokens, default 8192. */
+  readonly contextWindowTokens?: number;
+  readonly logger?: Logger;
 }
 
 // ---------------------------------------------------------------------------
@@ -52,33 +66,20 @@ const DEFAULT_TOKEN_TIMEOUT_MS = 30_000;
 // what the model itself supports, unless the request explicitly overrides
 // it — silently truncating long multi-article conversations from the front
 // (dropping the earliest content: system prompt, page context, article
-// titles/URLs) once the total exceeds that. 8192 matches llama3's native
-// context and is a reasonable default for typical local models.
-const OLLAMA_DEFAULT_NUM_CTX = 8192;
+// titles/URLs) once the total exceeds that. 8192 (DEFAULT_CONTEXT_WINDOW_TOKENS)
+// matches llama3's native context and is used when the user hasn't configured
+// ai.contextWindowTokens (CF-5.6).
 
-/**
- * Heuristic for "this endpoint is probably a local Ollama server" — matched
- * on loopback hosts or Ollama's default port, since arbitrary cloud
- * OpenAI-compatible APIs may reject an unrecognized top-level `options`
- * field and must never receive it.
- */
-export function isOllamaLikeEndpoint(baseUrl: string): boolean {
-  try {
-    const url = new URL(baseUrl);
-    if (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1" || url.hostname === "0.0.0.0") {
-      return true;
-    }
-    return url.port === "11434";
-  } catch {
-    return false;
-  }
-}
+// Re-exported for existing importers; the heuristic now lives in @shared/providers
+// and is only a fallback when no provider is given (CF-5.7).
+export { isOllamaLikeEndpoint };
 
 export function createStreamingClient(opts: StreamingClientOptions): StreamingAiClient {
   const fetchFn = opts.fetch ?? globalThis.fetch;
   const tokenTimeoutMs = opts.tokenTimeoutMs ?? DEFAULT_TOKEN_TIMEOUT_MS;
   const endpoint = opts.baseUrl.replace(/\/+$/, "") + "/v1/chat/completions";
-  const ollamaLike = isOllamaLikeEndpoint(opts.baseUrl);
+  const ollamaLike = opts.provider !== undefined ? opts.provider === "ollama" : isOllamaLikeEndpoint(opts.baseUrl);
+  const logger = opts.logger ?? noopLogger;
 
   return {
     async streamChatCompletion(req: StreamChatCompletionRequest): Promise<StreamChatCompletionResult> {
@@ -105,7 +106,9 @@ export function createStreamingClient(opts: StreamingClientOptions): StreamingAi
         stream: true,
       };
       if (ollamaLike) {
-        body.options = { num_ctx: OLLAMA_DEFAULT_NUM_CTX };
+        const numCtx = opts.contextWindowTokens ?? DEFAULT_CONTEXT_WINDOW_TOKENS;
+        body.options = { num_ctx: numCtx };
+        logger.debug("Applying Ollama num_ctx override", numCtx);
       }
 
       let response: Response;
@@ -125,15 +128,18 @@ export function createStreamingClient(opts: StreamingClientOptions): StreamingAi
             partialContent,
           };
         }
+        const detail = err instanceof Error ? err.message : "Network error";
+        logger.warn("Streaming request failed with a network error", detail);
         return {
           ok: false,
           reason: "network",
-          detail: err instanceof Error ? err.message : "Network error",
+          detail,
           partialContent,
         };
       }
 
       if (!response.ok) {
+        logger.warn("Streaming request returned a non-2xx response", response.status);
         return {
           ok: false,
           reason: "non-2xx",
@@ -144,6 +150,7 @@ export function createStreamingClient(opts: StreamingClientOptions): StreamingAi
       }
 
       if (!response.body) {
+        logger.warn("Streaming response had no body");
         return {
           ok: false,
           reason: "malformed",
@@ -256,6 +263,7 @@ export function createStreamingClient(opts: StreamingClientOptions): StreamingAi
         return { ok: true, content: partialContent };
       } catch (err: unknown) {
         if (err instanceof TokenTimeoutError) {
+          logger.warn("Streaming request timed out", `${tokenTimeoutMs}ms`);
           return {
             ok: false,
             reason: "timeout",
@@ -271,10 +279,12 @@ export function createStreamingClient(opts: StreamingClientOptions): StreamingAi
             partialContent,
           };
         }
+        const detail = err instanceof Error ? err.message : "Stream read error";
+        logger.warn("Streaming request failed while reading the response", detail);
         return {
           ok: false,
           reason: "network",
-          detail: err instanceof Error ? err.message : "Stream read error",
+          detail,
           partialContent,
         };
       }

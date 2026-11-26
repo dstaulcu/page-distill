@@ -40,10 +40,12 @@ function makeSettings(overrides?: Partial<Settings["export"]>): Settings {
   return {
     schemaVersion: 1,
     ai: {
+      provider: "openai-compatible",
       baseUrl: "https://api.openai.com",
       modelId: "gpt-4",
       apiKeyRef: "ref-123",
       systemPrompt: "Summarize this article.",
+      contextWindowTokens: 8192,
     },
     export: {
       filenamePattern: "YYYY-MM-DD-slugified-title",
@@ -52,7 +54,7 @@ function makeSettings(overrides?: Partial<Settings["export"]>): Settings {
       ...overrides,
     },
     sitePatterns: [],
-    autoExportConfigs: [],
+    debugLogging: false,
   };
 }
 

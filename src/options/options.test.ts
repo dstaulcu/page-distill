@@ -45,7 +45,6 @@ describe("Options Page", () => {
           <label><input type="checkbox" value="capture_date" /></label>
           <label><input type="checkbox" value="site_name" /></label>
         </div>
-        <div id="auto-export-list"></div>
         <button id="btn-save-settings"></button>
         <span id="save-status" class="save-status"></span>
       </div>
@@ -89,6 +88,21 @@ describe("Options Page", () => {
     it("reports multiple errors simultaneously", () => {
       const errors = validateFormFields("invalid-url", "");
       expect(errors).toHaveLength(2);
+    });
+
+    it("CF-5.6 rejects a zero context window", () => {
+      const errors = validateFormFields("", "YYYY-MM-DD-slugified-title", 0);
+      expect(errors.some((e) => e.field === "ai.contextWindowTokens")).toBe(true);
+    });
+
+    it("CF-5.6 rejects a non-integer context window", () => {
+      const errors = validateFormFields("", "YYYY-MM-DD-slugified-title", 100.5);
+      expect(errors.some((e) => e.field === "ai.contextWindowTokens")).toBe(true);
+    });
+
+    it("CF-5.6 accepts a positive integer context window", () => {
+      const errors = validateFormFields("", "YYYY-MM-DD-slugified-title", 32_000);
+      expect(errors.some((e) => e.field === "ai.contextWindowTokens")).toBe(false);
     });
   });
 
@@ -158,6 +172,10 @@ describe("Options Page", () => {
       expect(fieldToElementId("export.filenamePattern")).toBe("export-filename-pattern");
     });
 
+    it("maps ai.contextWindowTokens to ai-context-window", () => {
+      expect(fieldToElementId("ai.contextWindowTokens")).toBe("ai-context-window");
+    });
+
     it("returns unknown fields as-is", () => {
       expect(fieldToElementId("unknown.field")).toBe("unknown.field");
     });
@@ -173,11 +191,15 @@ interface FieldError {
   readonly message: string;
 }
 
-function validateFormFields(baseUrl: string, filenamePattern: string): FieldError[] {
+function validateFormFields(baseUrl: string, filenamePattern: string, contextWindowTokens: number = 8192): FieldError[] {
   const errors: FieldError[] = [];
 
   if (baseUrl !== "" && !/^https?:\/\//.test(baseUrl)) {
     errors.push({ field: "ai.baseUrl", message: "Base URL must start with http:// or https://" });
+  }
+
+  if (!Number.isInteger(contextWindowTokens) || contextWindowTokens < 1) {
+    errors.push({ field: "ai.contextWindowTokens", message: "Context window must be a positive integer" });
   }
 
   if (filenamePattern.trim() === "") {
@@ -233,6 +255,7 @@ function fieldToElementId(field: string): string {
     "ai.baseUrl": "ai-base-url",
     "ai.modelId": "ai-model-id",
     "ai.apiKey": "ai-api-key",
+    "ai.contextWindowTokens": "ai-context-window",
     "export.filenamePattern": "export-filename-pattern",
   };
   return map[field] ?? field;

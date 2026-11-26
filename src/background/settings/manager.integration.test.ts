@@ -314,43 +314,27 @@ describe("CF-5 Settings Manager Integration: Persistence", () => {
       expect(broadcast).not.toHaveBeenCalled();
     });
 
-    it("rejects invalid auto-export interval without modifying persisted settings", async () => {
+    it("rejects an invalid context window without modifying persisted settings", async () => {
       const syncStorage = createMockSyncStorage();
       const localStorage = createMockLocalStorage();
       const broadcast = vi.fn();
 
       const manager = createSettingsManager({ syncStorage, localStorage, broadcast });
 
-      // Set valid config first
-      const validConfigs = [{
-        origin: "https://example.com",
-        enabled: true,
-        intervalMinutes: 15,
-        destination: { kind: "download" as const },
-        mode: "content-only" as const,
-        skipIfUnchanged: false,
-        createdAt: "2024-01-01T00:00:00Z",
-        updatedAt: "2024-01-01T00:00:00Z",
-      }];
-      await manager.update({ autoExportConfigs: validConfigs });
+      await manager.update({ ai: { contextWindowTokens: 4096 } });
       broadcast.mockClear();
 
-      // Attempt invalid interval (0 is out of [1, 120] range)
-      const invalidConfigs = [{
-        ...validConfigs[0],
-        intervalMinutes: 0,
-      }];
-
-      const result = await manager.update({ autoExportConfigs: invalidConfigs });
+      // 8 tokens is below the 512 minimum
+      const result = await manager.update({ ai: { contextWindowTokens: 8 } });
 
       expect(result.ok).toBe(false);
       if (!result.ok) {
-        expect(result.errors.some((e) => e.field.includes("intervalMinutes"))).toBe(true);
+        expect(result.errors.some((e) => e.field === "ai.contextWindowTokens")).toBe(true);
       }
 
       // Verify persisted settings are unchanged
       const settings = await manager.get();
-      expect(settings.autoExportConfigs[0].intervalMinutes).toBe(15);
+      expect(settings.ai.contextWindowTokens).toBe(4096);
       expect(broadcast).not.toHaveBeenCalled();
     });
 
@@ -361,18 +345,8 @@ describe("CF-5 Settings Manager Integration: Persistence", () => {
       const manager = createSettingsManager({ syncStorage, localStorage, broadcast: () => {} });
 
       const result = await manager.update({
-        ai: { baseUrl: "ftp://invalid" },
+        ai: { baseUrl: "ftp://invalid", contextWindowTokens: 8 },
         export: { filenamePattern: "" },
-        autoExportConfigs: [{
-          origin: "https://example.com",
-          enabled: true,
-          intervalMinutes: 200,
-          destination: { kind: "download" },
-          mode: "content-only",
-          skipIfUnchanged: false,
-          createdAt: "2024-01-01T00:00:00Z",
-          updatedAt: "2024-01-01T00:00:00Z",
-        }],
       });
 
       expect(result.ok).toBe(false);
@@ -381,7 +355,7 @@ describe("CF-5 Settings Manager Integration: Persistence", () => {
         const fields = result.errors.map((e) => e.field);
         expect(fields).toContain("ai.baseUrl");
         expect(fields).toContain("export.filenamePattern");
-        expect(fields.some((f) => f.includes("intervalMinutes"))).toBe(true);
+        expect(fields).toContain("ai.contextWindowTokens");
       }
     });
   });
