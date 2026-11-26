@@ -581,6 +581,29 @@ describe("SF-8 logging", () => {
     expect(logger.debug).toHaveBeenCalled();
   });
 
+  it("logs which sections were requested and found, so a wrong export can be diagnosed", async () => {
+    const logger = makeSpyLogger();
+    const manager = createExportManager(makeOpts({ logger }));
+
+    await manager.export({
+      tabId: 1,
+      includeSummary: false,
+      includeContent: false,
+      includeQA: true,
+      messages: [
+        { role: "assistant", content: "S" },
+        { role: "user", content: "Q" },
+        { role: "assistant", content: "A" },
+      ],
+      destinations: [{ kind: "download" }],
+    });
+
+    const line = logger.debug.mock.calls.map((c) => c.join(" ")).find((l) => l.includes("Export sections"))!;
+    expect(line).toContain("summary=false content=false qa=true");
+    expect(line).toContain("messages=3");
+    expect(line).toContain("found: summary=no qaTurns=2");
+  });
+
   it("logs a warn when extraction fails", async () => {
     const logger = makeSpyLogger();
     const opts = makeOpts({ logger, extractContent: vi.fn().mockResolvedValue(makeExtractionFailure()) });

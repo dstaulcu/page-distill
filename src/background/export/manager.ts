@@ -141,6 +141,12 @@ export function createExportManager(opts: CreateExportManagerOptions): ExportMan
       const summary = includeSummary ? conversation.summary : null;
       const qaMessages = req.includeQA ? conversation.qa : null;
       const content = includeContent ? article.bodyMarkdown : null;
+      logger.debug(
+        "Export sections",
+        `requested: summary=${includeSummary} content=${includeContent} qa=${req.includeQA}`,
+        `messages=${req.messages?.length ?? "none (background copy)"}`,
+        `found: summary=${summary ? "yes" : "no"} qaTurns=${qaMessages?.length ?? 0}`,
+      );
 
       // A document with only frontmatter is useless: if every selected section
       // is empty (or none was selected), say so instead of exporting it.

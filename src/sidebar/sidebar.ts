@@ -1281,7 +1281,12 @@ function renderFooter(): HTMLElement {
       exportBtn.textContent = "Exporting...";
       try {
         const destination = await getDefaultExportDestination();
-        logger.debug("Export requested", destination.kind);
+        const onScreen = currentMessages();
+        logger.debug(
+          "Export requested", destination.kind,
+          `summary=${exportOptions.summary} content=${exportOptions.content} qa=${exportOptions.qa}`,
+          `messagesOnScreen=${onScreen.length}`,
+        );
         const response = await browser.runtime.sendMessage({
           kind: "exportRequested",
           payload: {
