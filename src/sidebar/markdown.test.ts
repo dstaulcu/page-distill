@@ -179,4 +179,24 @@ describe("markdown rendering — extended syntax", () => {
     expect(html).not.toContain("<table>");
     expect(html).toContain("<hr>");
   });
+
+  it("renders underlined (setext) headings: ==== is a title, ---- is a section heading, not a rule", () => {
+    const html = renderMarkdown("Summary of the page\n===================\n\nFindings\n--------\n\n- one\n- two");
+    expect(html).toContain("<h2>Summary of the page</h2>");
+    expect(html).toContain("<h3>Findings</h3>");
+    expect(html).not.toContain("<hr>");
+    expect(html).not.toContain("====");
+    expect(html).toContain("<ul><li>one</li><li>two</li></ul>");
+  });
+
+  it("still treats a dashes line after a blank line as a horizontal rule, not a heading", () => {
+    const html = renderMarkdown("Above\n\n---\n\nBelow");
+    expect(html).toContain("<hr>");
+    expect(html).not.toContain("<h3>");
+  });
+
+  it("does not make a heading out of list items or quotes followed by dashes", () => {
+    const html = renderMarkdown("- item\n---");
+    expect(html).not.toContain("<h3>");
+  });
 });

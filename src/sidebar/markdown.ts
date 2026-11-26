@@ -90,6 +90,13 @@ export function renderMarkdown(text: string): string {
   // Tables
   html = renderTables(html);
 
+  // Underlined (setext) headings — models often write "Title\n=====" and
+  // "Section\n-----". They must be recognised BEFORE horizontal rules, or the
+  // dashes line would become a rule. The text line may not itself be a list
+  // item, quote, heading or table row.
+  html = html.replace(/^(?![-*+>#|\s]|\d+[.)] )([^\n|]+)\n={3,}[ \t]*$/gm, "# $1");
+  html = html.replace(/^(?![-*+>#|\s]|\d+[.)] )([^\n|]+)\n-{3,}[ \t]*$/gm, "## $1");
+
   // Horizontal rules
   html = html.replace(/^(?:-{3,}|\*{3,}|_{3,})$/gm, "<hr>");
 
