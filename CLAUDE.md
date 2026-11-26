@@ -126,7 +126,6 @@ All external deps (browser APIs, fetch, crypto) are injected. The suite must pas
 
 ## Reference
 
-- `AUDIT.md` — the 2026-07 audit that drove the current test coverage and defect fixes
 - `README.md` — short user-facing docs (install, setup, privacy); architecture notes live here, not in the README
 - `scripts/release.mjs` — version bump + build + packaging (`npm run release`); produces the
   unsigned `.xpi` artifacts in `web-ext-artifacts/` (git-ignored)
