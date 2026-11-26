@@ -9,6 +9,8 @@ version heading and publishes them in the release notes.
 
 ## [Unreleased]
 
+## [4.2.0] - 2026-11-26
+
 ### Added
 - Copy button on every reply and on each code block.
 - Dark mode: the sidebar follows the system light/dark setting.
@@ -74,5 +76,6 @@ extraction, and encrypted API-key storage. Includes a Settings link in the Help 
 for the picker recovery hint after a cached session. Builds 4.0.1 to 4.0.3 were local packaging
 runs, so no separate version bumps were committed.
 
-[Unreleased]: https://github.com/dstaulcu/page-distill/compare/v4.1.1...HEAD
+[Unreleased]: https://github.com/dstaulcu/page-distill/compare/v4.2.0...HEAD
+[4.2.0]: https://github.com/dstaulcu/page-distill/releases/tag/v4.2.0
 [4.1.1]: https://github.com/dstaulcu/page-distill/releases/tag/v4.1.1
