@@ -1220,6 +1220,21 @@ function renderConfigError(): HTMLElement {
   return wrapper;
 }
 
+/** The conversation currently on screen, whatever phase the sidebar is in. */
+function currentMessages(): ReadonlyArray<PortConversationMessage> {
+  switch (state.phase) {
+    case "ready":
+    case "free-chat":
+    case "streaming":
+    case "error":
+      return state.messages;
+    case "summarizing":
+      return state.priorMessages;
+    default:
+      return [];
+  }
+}
+
 function renderFooter(): HTMLElement {
   const footer = el("footer", "sidebar-footer");
 
@@ -1274,6 +1289,8 @@ function renderFooter(): HTMLElement {
             includeSummary: exportOptions.summary,
             includeContent: exportOptions.content,
             includeQA: exportOptions.qa,
+            // What's on screen is the source of truth: the background's copy is lost if it was unloaded
+            messages: currentMessages().map((m) => ({ role: m.role, content: m.content })),
             destinations: [destination],
           },
         });

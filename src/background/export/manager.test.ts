@@ -690,3 +690,95 @@ describe("CF-4 export sections: summary, content, Q&A are chosen independently",
     expect((opts.deliverToDownload as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
   });
 });
+
+describe("CF-4 export uses the conversation the sidebar is showing", () => {
+  const msg = (role: "user" | "assistant", content: string) => ({ role, content });
+
+  async function exportDoc(
+    messages: ReadonlyArray<{ role: "user" | "assistant"; content: string }> | undefined,
+    opts?: Partial<CreateExportManagerOptions>,
+    flags?: { includeSummary?: boolean; includeQA?: boolean; includeContent?: boolean },
+  ): Promise<{ ok: boolean; doc: string; reason?: string }> {
+    const o = makeOpts(opts);
+    const manager = createExportManager(o);
+    const result = await manager.export({
+      tabId: 1,
+      includeSummary: flags?.includeSummary ?? true,
+      includeQA: flags?.includeQA ?? true,
+      includeContent: flags?.includeContent ?? false,
+      messages,
+      destinations: [{ kind: "download" }],
+    });
+    if (!result.ok) return { ok: false, doc: "", reason: result.reason };
+    const call = (o.deliverToDownload as ReturnType<typeof vi.fn>).mock.calls[0][0] as DownloadInput;
+    return { ok: true, doc: call.content };
+  }
+
+  it("exports the summary and Q&A even when the background has lost the conversation", async () => {
+    // getConversation → null is what the background returns after it was unloaded and restarted
+    const out = await exportDoc([msg("assistant", "Summary S"), msg("user", "Why?"), msg("assistant", "Because.")]);
+
+    expect(out.ok).toBe(true);
+    expect(out.doc).toContain("## Summary");
+    expect(out.doc).toContain("Summary S");
+    expect(out.doc).toContain("## Q&A");
+    expect(out.doc).toContain("Why?");
+    expect(out.doc).toContain("Because.");
+    expect(out.doc).not.toContain("## Content");
+  });
+
+  it("prefers the sidebar's messages over a stale background copy", async () => {
+    const stale = makeConversation([{ role: "assistant", content: "STALE summary", timestamp: "t" }]);
+    const out = await exportDoc([msg("assistant", "Fresh summary")], { getConversation: vi.fn().mockReturnValue(stale) });
+
+    expect(out.doc).toContain("Fresh summary");
+    expect(out.doc).not.toContain("STALE");
+  });
+
+  it("falls back to the background's conversation when the sidebar sends none", async () => {
+    const stored = makeConversation([{ role: "assistant", content: "Stored summary", timestamp: "t" }]);
+    const out = await exportDoc(undefined, { getConversation: vi.fn().mockReturnValue(stored) });
+
+    expect(out.doc).toContain("Stored summary");
+  });
+
+  it("exports the most recent summary after an update, keeping the Q&A free of summaries", async () => {
+    const out = await exportDoc([
+      msg("assistant", "Old summary"),
+      msg("user", "A question"),
+      msg("assistant", "An answer"),
+      msg("assistant", "New summary of all tabs"),
+    ]);
+
+    const summarySection = out.doc.split("## Q&A")[0];
+    expect(summarySection).toContain("New summary of all tabs");
+    expect(summarySection).not.toContain("Old summary");
+    const qa = out.doc.split("## Q&A")[1];
+    expect(qa).toContain("A question");
+    expect(qa).toContain("An answer");
+    expect(qa).not.toContain("summary");
+  });
+
+  it("treats a chat with no summary as Q&A only (the first answer is not a summary)", async () => {
+    const out = await exportDoc([msg("user", "Just chatting"), msg("assistant", "Sure")]);
+
+    expect(out.doc).not.toContain("## Summary");
+    expect(out.doc).toContain("## Q&A");
+    expect(out.doc).toContain("Just chatting");
+    expect(out.doc).toContain("Sure");
+  });
+
+  it("falls back to the background's conversation when the sidebar sends an empty list", async () => {
+    const stored = makeConversation([{ role: "assistant", content: "Stored summary", timestamp: "t" }]);
+    const out = await exportDoc([], { getConversation: vi.fn().mockReturnValue(stored) });
+
+    expect(out.doc).toContain("Stored summary");
+  });
+
+  it("still reports nothing-to-export when the selected sections are genuinely empty", async () => {
+    const out = await exportDoc([], undefined, { includeSummary: true, includeQA: true, includeContent: false });
+
+    expect(out.ok).toBe(false);
+    expect(out.reason).toBe("nothing-to-export");
+  });
+});

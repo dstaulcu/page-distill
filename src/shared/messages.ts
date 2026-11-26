@@ -43,6 +43,8 @@ export interface ExportRequestedPayload {
   readonly includeSummary?: boolean;
   readonly includeContent?: boolean;
   readonly includeQA: boolean;
+  /** The conversation as the sidebar shows it (see ExportRequest.messages). */
+  readonly messages?: ReadonlyArray<{ readonly role: "user" | "assistant"; readonly content: string }>;
   readonly destinations: ReadonlyArray<{ readonly kind: "download" } | { readonly kind: "clipboard" }>;
 }
 

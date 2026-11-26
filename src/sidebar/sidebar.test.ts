@@ -697,6 +697,31 @@ describe("CF-4.4 export destination and clipboard delivery", () => {
     expect(btn.title).toBe("None of the selected sections has content.");
   });
 
+  it("sends the conversation on screen with the export request, so Summary and Q&A survive a restarted background", async () => {
+    await loadSidebar();
+    emit(contextLoaded);
+    emit({
+      type: "conversationRestored",
+      messages: [
+        { role: "assistant", content: "The summary", timestamp: "t" },
+        { role: "user", content: "A question", timestamp: "t" },
+        { role: "assistant", content: "An answer", timestamp: "t", model: "m" },
+      ],
+    });
+
+    (app().querySelector(".btn-export") as HTMLButtonElement).click();
+    await flush();
+
+    const exportMsg = sentRuntimeMessages.find(
+      (m) => (m as { kind?: string }).kind === "exportRequested",
+    ) as { payload: { messages: Array<{ role: string; content: string }> } };
+    expect(exportMsg.payload.messages).toEqual([
+      { role: "assistant", content: "The summary" },
+      { role: "user", content: "A question" },
+      { role: "assistant", content: "An answer" },
+    ]);
+  });
+
   it("answers clipboardWrite port messages with clipboardResult", async () => {
     const writeText = vi.fn(async () => {});
     Object.defineProperty(navigator, "clipboard", {

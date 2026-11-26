@@ -28,6 +28,12 @@ export interface ExportRequest {
   readonly includeContent?: boolean;
   /** Include the follow-up Q&A exchange. */
   readonly includeQA: boolean;
+  /**
+   * The conversation as the sidebar is showing it. Preferred over the
+   * background's in-memory copy, which is gone if the background page was
+   * unloaded while the sidebar stayed open.
+   */
+  readonly messages?: ReadonlyArray<{ readonly role: "user" | "assistant"; readonly content: string }>;
   readonly destinations: ReadonlyArray<ExportDestination>;
 }
 
@@ -129,8 +135,11 @@ export function createExportManager(opts: CreateExportManagerOptions): ExportMan
       // 4. Assemble the document
       const includeSummary = req.includeSummary !== false;
       const includeContent = req.includeContent !== false;
-      const summary = includeSummary ? getSummary(req.tabId, getConversation) : null;
-      const qaMessages = req.includeQA ? getQAMessages(req.tabId, getConversation) : null;
+      const conversation = splitConversation(
+        req.messages && req.messages.length > 0 ? req.messages : (getConversation(req.tabId)?.messages ?? []),
+      );
+      const summary = includeSummary ? conversation.summary : null;
+      const qaMessages = req.includeQA ? conversation.qa : null;
       const content = includeContent ? article.bodyMarkdown : null;
 
       // A document with only frontmatter is useless: if every selected section
@@ -220,47 +229,29 @@ function assembleDocument(input: AssembleDocumentInput): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Extracts the summary from the conversation (first assistant message).
+ * Splits a conversation into its summary and its Q&A.
+ *
+ * A summary is an assistant message that does NOT answer a user message (the
+ * first reply, and any "Update summary" after more tabs were added); an answer
+ * always follows a user question. The exported Summary is the most recent
+ * summary; Q&A is every question/answer, in order, without the summaries.
  */
-function getSummary(
-  tabId: number,
-  getConversation: (tabId: number) => Conversation | null,
-): string | null {
-  const conversation = getConversation(tabId);
-  if (!conversation || conversation.messages.length === 0) {
-    return null;
-  }
+function splitConversation(
+  messages: ReadonlyArray<{ readonly role: "user" | "assistant"; readonly content: string }>,
+): { summary: string | null; qa: ReadonlyArray<{ role: "user" | "assistant"; content: string }> | null } {
+  let summary: string | null = null;
+  const qa: Array<{ role: "user" | "assistant"; content: string }> = [];
 
-  // The summary is the first assistant message in the conversation
-  const firstAssistant = conversation.messages.find((m) => m.role === "assistant");
-  return firstAssistant?.content ?? null;
-}
+  messages.forEach((m, i) => {
+    const isSummary = m.role === "assistant" && messages[i - 1]?.role !== "user";
+    if (isSummary) {
+      if (m.content) summary = m.content;
+    } else {
+      qa.push({ role: m.role, content: m.content });
+    }
+  });
 
-/**
- * Extracts Q&A messages from the conversation (all messages after the first assistant message).
- */
-function getQAMessages(
-  tabId: number,
-  getConversation: (tabId: number) => Conversation | null,
-): ReadonlyArray<{ role: "user" | "assistant"; content: string }> | null {
-  const conversation = getConversation(tabId);
-  if (!conversation || conversation.messages.length <= 1) {
-    return null;
-  }
-
-  // Find the index of the first assistant message (the summary)
-  const summaryIndex = conversation.messages.findIndex((m) => m.role === "assistant");
-  if (summaryIndex === -1) {
-    return null;
-  }
-
-  // Q&A messages are everything after the summary
-  const qaMessages = conversation.messages.slice(summaryIndex + 1);
-  if (qaMessages.length === 0) {
-    return null;
-  }
-
-  return qaMessages.map((m) => ({ role: m.role, content: m.content }));
+  return { summary, qa: qa.length > 0 ? qa : null };
 }
 
 // ---------------------------------------------------------------------------

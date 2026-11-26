@@ -233,9 +233,9 @@ async function handleExtractRequested(msg: MessageOf<"extractRequested">): Promi
 }
 
 async function handleExportRequested(msg: MessageOf<"exportRequested">): Promise<MessageOf<"exportResult">> {
-  const { tabId, includeSummary, includeContent, includeQA, destinations } = msg.payload;
+  const { tabId, includeSummary, includeContent, includeQA, messages, destinations } = msg.payload;
 
-  const result = await exportManager.export({ tabId, includeSummary, includeContent, includeQA, destinations: [...destinations] });
+  const result = await exportManager.export({ tabId, includeSummary, includeContent, includeQA, messages, destinations: [...destinations] });
 
   if (result.ok) {
     return buildMessage("exportResult", {
