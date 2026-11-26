@@ -133,7 +133,7 @@ describe("CF-1 extract", () => {
             <nav>Navigation stuff</nav>
             <div id="main-content">
               <h1>Article Title</h1>
-              <p>This is the article body content that should be extracted.</p>
+              <p>${"This is the article body content that should be extracted. It has enough real prose to count as an article rather than a stub of boilerplate text. ".repeat(4)}</p>
             </div>
             <footer>Footer stuff</footer>
           </body>
@@ -156,13 +156,13 @@ describe("CF-1 extract", () => {
       }
     });
 
-    it("returns high confidence when selector matches", async () => {
+    it("returns high confidence when selector matches substantial prose", async () => {
       const html = `
         <!DOCTYPE html>
         <html>
           <head><title>Test</title></head>
           <body>
-            <div class="content"><p>Some content here.</p></div>
+            <div class="content"><p>${"Some real article content with enough words to be judged substantial prose. ".repeat(8)}</p></div>
           </body>
         </html>
       `;
@@ -288,6 +288,7 @@ describe("CF-1 extract", () => {
       const badDoc = {
         URL: "https://example.com",
         querySelector: () => { throw new Error("DOM access failed"); },
+        querySelectorAll: () => { throw new Error("DOM access failed"); },
       } as unknown as Document;
 
       const result = await extract({
@@ -308,6 +309,7 @@ describe("CF-1 extract", () => {
       const badDoc = {
         URL: "https://example.com",
         querySelector: () => { throw new Error(longMessage); },
+        querySelectorAll: () => { throw new Error(longMessage); },
       } as unknown as Document;
 
       const result = await extract({

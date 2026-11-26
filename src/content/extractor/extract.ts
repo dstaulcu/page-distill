@@ -1,6 +1,9 @@
 import { extractWithReadability } from "./readability-wrapper";
 import { domToMarkdown } from "./dom-to-markdown";
 import { extractMetadata } from "./metadata";
+import { pickContentElement } from "./candidates";
+import { stripNoise } from "./noise";
+import { assessConfidence } from "./confidence";
 import type { ExtractedArticle } from "@shared/types";
 
 // ---------------------------------------------------------------------------
@@ -24,14 +27,15 @@ export type ExtractionResult =
 /**
  * Top-level content extraction orchestrator.
  *
- * 1. If `contentSelector` is provided, querySelector on the doc.
- *    - If it matches, use innerHTML as the extraction source.
+ * 1. If `contentSelector` is provided, resolve it to the best-scoring matching
+ *    element (text-dense, link-light — not merely the first match).
+ *    - If it matches, extract from that element (boilerplate stripped).
  *    - If it matches nothing, fall back to Readability and flag pattern as stale.
  * 2. If no `contentSelector`, run extractWithReadability directly.
  * 3. Convert the HTML content to Markdown via domToMarkdown.
  * 4. Extract metadata via extractMetadata.
- * 5. Assemble the ExtractedArticle from metadata + markdown output.
- * 6. Return success with confidence, or failure with reason.
+ * 5. Assemble the ExtractedArticle; confidence is judged on the final markdown
+ *    (length, link density, prose), not on which path produced it.
  */
 export async function extract(opts?: ExtractOptions): Promise<ExtractionResult> {
   const doc = opts?.doc ?? document;
@@ -41,7 +45,7 @@ export async function extract(opts?: ExtractOptions): Promise<ExtractionResult> 
   try {
     // --- Path A: contentSelector provided ---
     if (contentSelector) {
-      const selectedElement = doc.querySelector(contentSelector);
+      const selectedElement = pickContentElement(doc, contentSelector);
 
       if (selectedElement) {
         // Run Readability on a scoped document containing only the selected element.
@@ -53,8 +57,12 @@ export async function extract(opts?: ExtractOptions): Promise<ExtractionResult> 
         if (readabilityResult.ok && readabilityResult.result.textContent.trim().length >= 100) {
           markdownOutput = domToMarkdown(readabilityResult.result.content);
         } else {
-          // Readability stripped too much — fall back to raw innerHTML
-          markdownOutput = domToMarkdown(selectedElement.innerHTML);
+          // Readability stripped too much — fall back to the element's own HTML,
+          // still with ads / nav / hidden elements removed.
+          markdownOutput = domToMarkdown(cleanInnerHtml(selectedElement));
+          if (markdownOutput.markdown === "") {
+            markdownOutput = domToMarkdown(selectedElement.innerHTML);
+          }
         }
 
         if (markdownOutput.markdown === "") {
@@ -65,19 +73,11 @@ export async function extract(opts?: ExtractOptions): Promise<ExtractionResult> 
           };
         }
 
-        const metadata = extractMetadata({ doc, url });
-
-        const article: ExtractedArticle = {
-          title: metadata.title,
-          author: metadata.author,
-          publicationDate: metadata.publicationDate,
-          sourceUrl: metadata.sourceUrl,
-          siteName: metadata.siteName,
-          bodyMarkdown: markdownOutput.markdown,
-          bodyCharacterCount: markdownOutput.bodyCharacterCount,
+        return {
+          ok: true,
+          article: buildArticle(doc, url, markdownOutput),
+          confidence: assessConfidence(markdownOutput.markdown),
         };
-
-        return { ok: true, article, confidence: "high" };
       }
 
       // Selector matched nothing — fall back to Readability, flag stale
@@ -92,19 +92,12 @@ export async function extract(opts?: ExtractOptions): Promise<ExtractionResult> 
       }
 
       const markdownOutput = domToMarkdown(readabilityOutcome.result.content);
-      const metadata = extractMetadata({ doc, url });
-
-      const article: ExtractedArticle = {
-        title: metadata.title,
-        author: metadata.author,
-        publicationDate: metadata.publicationDate,
-        sourceUrl: metadata.sourceUrl,
-        siteName: metadata.siteName,
-        bodyMarkdown: markdownOutput.markdown,
-        bodyCharacterCount: markdownOutput.bodyCharacterCount,
+      return {
+        ok: true,
+        article: buildArticle(doc, url, markdownOutput),
+        confidence: assessConfidence(markdownOutput.markdown),
+        stalePattern: true,
       };
-
-      return { ok: true, article, confidence: readabilityOutcome.confidence, stalePattern: true };
     }
 
     // --- Path B: no contentSelector — use Readability directly ---
@@ -119,19 +112,11 @@ export async function extract(opts?: ExtractOptions): Promise<ExtractionResult> 
     }
 
     const markdownOutput = domToMarkdown(readabilityOutcome.result.content);
-    const metadata = extractMetadata({ doc, url });
-
-    const article: ExtractedArticle = {
-      title: metadata.title,
-      author: metadata.author,
-      publicationDate: metadata.publicationDate,
-      sourceUrl: metadata.sourceUrl,
-      siteName: metadata.siteName,
-      bodyMarkdown: markdownOutput.markdown,
-      bodyCharacterCount: markdownOutput.bodyCharacterCount,
+    return {
+      ok: true,
+      article: buildArticle(doc, url, markdownOutput),
+      confidence: assessConfidence(markdownOutput.markdown),
     };
-
-    return { ok: true, article, confidence: readabilityOutcome.confidence };
   } catch (error) {
     const detail = error instanceof Error
       ? error.message.slice(0, 200)
@@ -148,6 +133,30 @@ export async function extract(opts?: ExtractOptions): Promise<ExtractionResult> 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+function buildArticle(
+  doc: Document,
+  url: string,
+  markdownOutput: ReturnType<typeof domToMarkdown>,
+): ExtractedArticle {
+  const metadata = extractMetadata({ doc, url });
+  return {
+    title: metadata.title,
+    author: metadata.author,
+    publicationDate: metadata.publicationDate,
+    sourceUrl: metadata.sourceUrl,
+    siteName: metadata.siteName,
+    bodyMarkdown: markdownOutput.markdown,
+    bodyCharacterCount: markdownOutput.bodyCharacterCount,
+  };
+}
+
+/** innerHTML of a detached copy of `element` with boilerplate removed. */
+function cleanInnerHtml(element: Element): string {
+  const copy = element.cloneNode(true) as Element;
+  stripNoise(copy);
+  return copy.innerHTML;
+}
 
 /**
  * Creates a minimal HTML document containing only the given element's content,
