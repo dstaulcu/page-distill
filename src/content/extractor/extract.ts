@@ -3,7 +3,9 @@ import { domToMarkdown } from "./dom-to-markdown";
 import { extractMetadata } from "./metadata";
 import { pickContentElement } from "./candidates";
 import { stripNoise } from "./noise";
-import { assessConfidence } from "./confidence";
+import { assessConfidence, measureMarkdown } from "./confidence";
+import { buildHeadlineIndex } from "./index-page";
+import { BUILTIN_GENERIC_FALLBACK_PATTERN } from "@background/site-patterns/matcher";
 import type { ExtractedArticle } from "@shared/types";
 
 // ---------------------------------------------------------------------------
@@ -38,6 +40,41 @@ export type ExtractionResult =
  *    (length, link density, prose), not on which path produced it.
  */
 export async function extract(opts?: ExtractOptions): Promise<ExtractionResult> {
+  const result = await extractArticle(opts);
+
+  // Portal / front pages: Readability grabs one story card and the rest of the
+  // page vanishes. When the extraction is a sliver of a page that is mostly
+  // linked headlines, return the headline list instead. Only for automatic
+  // selection — a selector the user picked is always respected.
+  const selector = opts?.contentSelector;
+  if (selector && selector !== BUILTIN_GENERIC_FALLBACK_PATTERN.contentSelector) return result;
+
+  try {
+    const doc = opts?.doc ?? document;
+    const url = opts?.url ?? doc.URL ?? "";
+    const index = buildHeadlineIndex(doc, url);
+    if (!index) return result;
+
+    const articleChars = result.ok ? measureMarkdown(result.article.bodyMarkdown).textLength : 0;
+    if (index.pageTextLength > 0 && articleChars / index.pageTextLength >= MAX_ARTICLE_SHARE_OF_PAGE) return result;
+
+    const base = result.ok
+      ? result.article
+      : buildArticle(doc, url, { markdown: "", bodyCharacterCount: 0 });
+    return {
+      ok: true,
+      article: { ...base, bodyMarkdown: index.markdown, bodyCharacterCount: index.markdown.length },
+      confidence: "medium",
+    };
+  } catch {
+    return result; // the index is a bonus — never let it break a normal extraction
+  }
+}
+
+/** An extraction smaller than this share of the page's text, on a page full of headline links, is a portal. */
+const MAX_ARTICLE_SHARE_OF_PAGE = 0.25;
+
+async function extractArticle(opts?: ExtractOptions): Promise<ExtractionResult> {
   const doc = opts?.doc ?? document;
   const url = opts?.url ?? doc.URL ?? "";
   const contentSelector = opts?.contentSelector;

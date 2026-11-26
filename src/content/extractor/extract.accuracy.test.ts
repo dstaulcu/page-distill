@@ -114,3 +114,71 @@ describe("CF-1 extraction accuracy", () => {
     expect(doc.querySelector("footer")).not.toBeNull();
   });
 });
+
+describe("CF-1 portal / homepage pages", () => {
+  const card = (i: number) =>
+    `<div class="card"><h2><a href="/story/${i}">Story headline number ${i} that is long enough</a></h2><p>Short blurb ${i}.</p></div>`;
+  const portal = (extra = "") =>
+    `<!DOCTYPE html><html><head><title>News Home</title></head><body><main>` +
+    `<div class="lead"><h1>Lead feature</h1>${PARA(1)}</div>` +
+    Array.from({ length: 20 }, (_, i) => card(i)).join("") +
+    `${extra}</main></body></html>`;
+
+  it("returns the headline list instead of one arbitrary card when the page is a portal", async () => {
+    const doc = createDocument(portal(), "https://news.example.com/");
+    const result = await extract({ doc, url: "https://news.example.com/", contentSelector: GENERIC });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const md = result.article.bodyMarkdown;
+    expect(md).toContain("[Story headline number 0 that is long enough](https://news.example.com/story/0)");
+    expect(md).toContain("[Story headline number 19 that is long enough](https://news.example.com/story/19)");
+    expect(result.confidence).toBe("medium");
+  });
+
+  it("also does it when no selector is given at all", async () => {
+    const doc = createDocument(portal(), "https://news.example.com/");
+    const result = await extract({ doc, url: "https://news.example.com/" });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.article.bodyMarkdown).toContain("Story headline number 5");
+  });
+
+  it("leaves a real article alone even if it has a rail of headline links", async () => {
+    const rail = Array.from({ length: 14 }, (_, i) => `<h3><a href="/r/${i}">Rail headline number ${i} for other stories</a></h3>`).join("");
+    const doc = createDocument(
+      `<!DOCTYPE html><html><head><title>A</title></head><body><article><h1>The Story</h1>${PARA(30)}</article><div class="rail">${rail}</div></body></html>`,
+    );
+    const result = await extract({ doc, contentSelector: GENERIC });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.article.bodyMarkdown).toContain("genuine story text");
+    expect(result.article.bodyMarkdown).not.toContain("Rail headline");
+  });
+
+  it("respects a selector the user picked themselves (no index override)", async () => {
+    const doc = createDocument(portal(), "https://news.example.com/");
+    const result = await extract({ doc, url: "https://news.example.com/", contentSelector: ".lead" });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.article.bodyMarkdown).toContain("genuine story text");
+    expect(result.article.bodyMarkdown).not.toContain("Story headline number 5");
+  });
+
+  it("strips an in-article promo module (Popular Reads) from a normal article", async () => {
+    const doc = createDocument(
+      `<!DOCTYPE html><html><head><title>A</title></head><body><article><h1>The Story</h1>${PARA(8)}` +
+        `<section class="MobileContentPromo"><header><h2>Popular Reads</h2></header><ul><li><a href="/p">Another unrelated story headline</a></li></ul></section>` +
+        `${PARA(8)}</article></body></html>`,
+    );
+    const result = await extract({ doc, contentSelector: GENERIC });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.article.bodyMarkdown).toContain("genuine story text");
+    expect(result.article.bodyMarkdown).not.toContain("Popular Reads");
+  });
+});

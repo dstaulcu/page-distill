@@ -82,3 +82,58 @@ describe("CF-1 stripNoise", () => {
     expect(stripNoise(root)).toBe(2);
   });
 });
+
+describe("CF-1 stripNoise: promo sections and ad labels inside the article", () => {
+  const prose = (n: number) => "A full sentence of real article prose that readers came for. ".repeat(n);
+
+  it("removes a 'Popular Reads' style module by its heading, even with meaningless class names", () => {
+    const root = body(
+      `<div><p>${prose(12)}</p>` +
+        `<section class="x1 y2"><header><h2>Popular Reads</h2></header><ul><li><a href="/a">Some other story headline</a></li><li><a href="/b">And yet another headline</a></li></ul></section>` +
+        `<p>${prose(12)}</p></div>`,
+    );
+    stripNoise(root);
+    expect(root.textContent).not.toContain("Popular Reads");
+    expect(root.textContent).not.toContain("Some other story");
+    expect(root.textContent).toContain("real article prose");
+  });
+
+  it("removes related / trending / recommended / sponsored modules", () => {
+    for (const heading of ["Related Stories", "Trending Now", "Recommended for you", "More from Example", "You may also like", "Most Read", "Sponsored Content", "Around the web"]) {
+      const root = body(`<div><p>${prose(12)}</p><div class="q"><h3>${heading}</h3><p><a href="/z">A teaser line for something else</a></p></div></div>`);
+      stripNoise(root);
+      expect(root.textContent, heading).not.toContain(heading);
+      expect(root.textContent, heading).not.toContain("teaser line");
+    }
+  });
+
+  it("keeps an ordinary section whose heading merely contains a promo word", () => {
+    const root = body(`<div><section><h2>Why popular reads matter in publishing</h2><p>${prose(12)}</p></section></div>`);
+    stripNoise(root);
+    expect(root.textContent).toContain("Why popular reads matter");
+  });
+
+  it("never removes a promo-headed container that holds most of the text", () => {
+    const root = body(`<div><section><h2>Related Reading</h2><p>${prose(20)}</p></section><p>short</p></div>`);
+    stripNoise(root);
+    expect(root.textContent).toContain("real article prose");
+  });
+
+  it("removes standalone 'Advertisement' / 'Story continues below' labels but not those words inside a sentence", () => {
+    const root = body(
+      `<p>${prose(10)}</p><div>Advertisement</div><span>STORY CONTINUES BELOW ADVERTISEMENT</span><div>Sponsored</div>` +
+        `<p>The advertisement industry changed. ${prose(2)}</p>`,
+    );
+    stripNoise(root);
+    expect(root.textContent).not.toMatch(/^Advertisement$/m);
+    expect(root.textContent).not.toContain("STORY CONTINUES");
+    expect(root.textContent).not.toContain("Sponsored");
+    expect(root.textContent).toContain("The advertisement industry changed.");
+  });
+
+  it("matches CamelCase promo class names such as MobileContentPromo", () => {
+    const root = body(`<p>${prose(12)}</p><section class="MobileContentPromo Kiog"><span>Buy things now from our partner</span></section>`);
+    stripNoise(root);
+    expect(root.textContent).not.toContain("Buy things now");
+  });
+});
