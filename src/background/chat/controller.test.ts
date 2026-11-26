@@ -1721,6 +1721,20 @@ describe("CF-3.9 context content budget", () => {
     expect(startMsg(ctx).contextTruncated).toBe(false);
   });
 
+  it("summarize: long tracking URLs are shortened in the prompt so real content fits (labels kept)", async () => {
+    const tracking = "https://r.example.com/aff?" + "utm_junk=1&".repeat(40);
+    const body = "Intro text. " + Array.from({ length: 5 }, (_, i) => `[Offer ${i}](${tracking})`).join(" ");
+    const ctx = build({ baseUrl: OLLAMA_URL, contextWindowTokens: 8192, bodies: { 42: body } });
+    const listener = await connect(ctx);
+    listener({ type: "summarize" });
+    await finish(ctx);
+
+    const user = ctx.getCaptured().messages.find((m) => m.role === "user")!.content;
+    expect(user).toContain("[Offer 0](https://r.example.com/aff)");
+    expect(user).toContain("[Offer 4](https://r.example.com/aff)");
+    expect(user).not.toContain("utm_junk");
+  });
+
   it("summarize: shortens every tab (keeping the start of each) so the prompt fits the window", async () => {
     // budgetChars = floor(400 * 4 * 0.75) = 1200
     const ctx = build({ baseUrl: OLLAMA_URL, contextWindowTokens: 400, bodies: { 42: "PRIMARY_" + "p".repeat(3000), 43: "SECOND_" + "s".repeat(3000) } });

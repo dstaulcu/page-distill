@@ -24,6 +24,7 @@ import type {
   ChatMessage,
 } from "./streaming-client";
 import { fitConversationToBudget, fitArticlesToBudget, computeBudgetChars, computeArticleBudgetChars, DEFAULT_CONTEXT_WINDOW_TOKENS } from "./context-budget";
+import { shortenLinkUrls } from "./link-shortener";
 import type { Logger } from "@shared/logger";
 import { noopLogger } from "@shared/logger";
 
@@ -298,7 +299,7 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
 
         const article = extractionResult.article;
         logger.debug("Extraction succeeded for tab", tabId, `confidence=${extractionResult.confidence}`, `chars=${article.bodyCharacterCount}`);
-        const content = article.bodyMarkdown.slice(0, MAX_PAGE_CONTENT_CHARS);
+        const content = shortenLinkUrls(article.bodyMarkdown).slice(0, MAX_PAGE_CONTENT_CHARS);
 
         contextTabs.set(tabId, { url: article.sourceUrl, title: article.title, content, confidence: extractionResult.confidence });
 
@@ -384,7 +385,7 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
         }
 
         const article = extractionResult.article;
-        const content = article.bodyMarkdown.slice(0, MAX_PAGE_CONTENT_CHARS);
+        const content = shortenLinkUrls(article.bodyMarkdown).slice(0, MAX_PAGE_CONTENT_CHARS);
         contextTabs.set(tabId, { url: article.sourceUrl, title: article.title, content, confidence: extractionResult.confidence });
         send({ type: "contextTabAdded", tabId, url: article.sourceUrl, title: article.title, confidence: extractionResult.confidence });
         persistContextTabs();
@@ -411,7 +412,7 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
             try {
               const result = await extractContent(tabId);
               if (result.ok) {
-                ctx.content = result.article.bodyMarkdown.slice(0, MAX_PAGE_CONTENT_CHARS);
+                ctx.content = shortenLinkUrls(result.article.bodyMarkdown).slice(0, MAX_PAGE_CONTENT_CHARS);
               }
             } catch {
               // Continue without content for this tab
