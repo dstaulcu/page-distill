@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import * as fc from "fast-check";
-import { isSamePageNavigation, canonicalizeUrl } from "./url-utils";
+import { isSamePageNavigation } from "./url-utils";
 
 /**
  * Property-based tests for URL navigation session logic.
@@ -154,33 +154,6 @@ describe("url-utils property tests", () => {
             expect(isSamePageNavigation(url1, url2)).toBe(false);
           },
         ),
-        { numRuns: 200 },
-      );
-    });
-
-    it("canonicalizeUrl always strips the fragment", () => {
-      fc.assert(
-        fc.property(validUrl, (url) => {
-          const canonical = canonicalizeUrl(url);
-          expect(canonical).not.toContain("#");
-        }),
-        { numRuns: 200 },
-      );
-    });
-
-    it("canonicalizeUrl preserves origin, path, and query", () => {
-      fc.assert(
-        fc.property(urlComponents, ({ origin, path, query, fragment }) => {
-          const url = `${origin}${path}${query}${fragment}`;
-          const canonical = canonicalizeUrl(url);
-
-          // The URL constructor normalizes default ports (80 for http, 443 for https),
-          // so we compare against the URL-parsed expected value rather than raw string.
-          const parsed = new URL(url);
-          const expected = parsed.origin + parsed.pathname + parsed.search;
-
-          expect(canonical).toBe(expected);
-        }),
         { numRuns: 200 },
       );
     });

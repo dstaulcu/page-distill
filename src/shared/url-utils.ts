@@ -32,18 +32,3 @@ export function isSamePageNavigation(oldUrl: string, newUrl: string): boolean {
     return false;
   }
 }
-
-/**
- * Canonicalizes a URL by stripping the fragment for comparison purposes.
- * Returns origin + pathname + search (query string) without the hash.
- *
- * Returns the original string unchanged if it cannot be parsed.
- */
-export function canonicalizeUrl(url: string): string {
-  try {
-    const parsed = new URL(url);
-    return parsed.origin + parsed.pathname + parsed.search;
-  } catch {
-    return url;
-  }
-}

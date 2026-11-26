@@ -104,18 +104,6 @@ export interface ExtractedArticle {
 }
 
 // ---------------------------------------------------------------------------
-// Tab Context Entry
-// ---------------------------------------------------------------------------
-
-export interface TabContextEntry {
-  readonly tabId: number;
-  readonly url: string;
-  readonly title: string;
-  readonly content: string | null;
-  readonly confidence: "high" | "medium" | "low" | null;
-}
-
-// ---------------------------------------------------------------------------
 // Tab State
 // ---------------------------------------------------------------------------
 
