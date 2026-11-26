@@ -1,6 +1,6 @@
-# Distill
+# Page Distill
 
-Distill is a Firefox extension that summarizes the web page you're reading and lets you ask
+Page Distill is a Firefox extension that summarizes the web page you're reading and lets you ask
 follow-up questions about it. It uses an AI model that you choose, such as a local Ollama
 model or any OpenAI-compatible service.
 
@@ -14,7 +14,7 @@ model or any OpenAI-compatible service.
   page content, and your Q&A.
 - **Copy** any reply, or a single code block, with one click.
 - **Dark mode.** The sidebar follows your system theme.
-- **Fix a bad extraction.** If Distill grabs the wrong part of a page, pick the right
+- **Fix a bad extraction.** If Page Distill grabs the wrong part of a page, pick the right
   element with the element picker and it remembers your choice for that site.
 
 ## Install
@@ -51,7 +51,7 @@ then **Options**).
 
 ## Privacy
 
-Distill sends the page text you ask about to the AI server you configured, and nowhere
+Page Distill sends the page text you ask about to the AI server you configured, and nowhere
 else. With a local Ollama model, nothing leaves your computer. Your API key is stored
 separately from your other settings.
 

@@ -1,0 +1,22 @@
+{
+  "extName": {
+    "message": "Page Distill",
+    "description": "Product name: add-on list, sidebar title bar, settings page, help menu, docs."
+  },
+  "extDescription": {
+    "message": "Extract, summarize, and export web page content as Markdown.",
+    "description": "Add-on description shown in the add-on manager."
+  },
+  "toggleSidebarTitle": {
+    "message": "Toggle Page Distill Sidebar",
+    "description": "Toolbar button tooltip."
+  },
+  "assistantName": {
+    "message": "Page Distill",
+    "description": "Speaker label above each AI reply in the chat."
+  },
+  "logPrefix": {
+    "message": "[Page Distill]",
+    "description": "Prefix on debug-log lines in the browser console."
+  }
+}

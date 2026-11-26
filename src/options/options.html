@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Distill Settings</title>
+  <title>Page Distill Settings</title>
   <link rel="stylesheet" href="options.css" />
 </head>
 <body>
   <div id="app">
     <header class="page-header">
-      <h1>Distill Settings</h1>
+      <h1><span data-brand="product">Page Distill</span> Settings</h1>
     </header>
 
     <main class="settings-container">
@@ -49,7 +49,7 @@
         <div class="form-group" id="group-ai-context-window">
           <label for="ai-context-window">Context window (tokens)</label>
           <input type="number" id="ai-context-window" min="512" max="10000000" step="1" placeholder="8192" autocomplete="off" />
-          <span class="hint">Your model's real context window. Used only by the Ollama provider: it is sent as <code>num_ctx</code>, and Distill trims the oldest chat turns and shortens long pages to fit (about 3 characters of prompt per token). OpenAI-compatible servers are never trimmed.</span>
+          <span class="hint">Your model's real context window. Used only by the Ollama provider: it is sent as <code>num_ctx</code>, and <span data-brand="product">Page Distill</span> trims the oldest chat turns and shortens long pages to fit (about 3 characters of prompt per token). OpenAI-compatible servers are never trimmed.</span>
           <span class="field-error" id="error-ai-context-window"></span>
         </div>
         <div class="form-group form-actions">
@@ -121,7 +121,7 @@
             Enable debug logging
           </label>
           <span class="hint">
-            Writes [Distill]-prefixed messages to the browser console: the background
+            Writes <span data-brand="logPrefix">[Page Distill]</span>-prefixed messages to the browser console: the background
             page's console (about:debugging → This Firefox → Inspect), and this page's
             or the sidebar's own devtools console. Off by default.
           </span>

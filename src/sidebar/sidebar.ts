@@ -15,6 +15,7 @@ import {
 } from "@shared/port-protocol";
 import { isMessageOfKind, buildMessage } from "@shared/messages";
 import { createLogger } from "@shared/logger";
+import { PRODUCT_NAME, ASSISTANT_NAME } from "@shared/branding";
 
 // ─── State Machine ───────────────────────────────────────────────────────────
 
@@ -625,7 +626,7 @@ function renderHeader(): HTMLElement {
     const helpDropdown = el("div", "help-menu-dropdown");
 
     const version = el("div", "help-menu-version");
-    version.textContent = `Distill v${EXTENSION_VERSION}`;
+    version.textContent = `${PRODUCT_NAME} v${EXTENSION_VERSION}`;
     helpDropdown.appendChild(version);
 
     const settingsLink = el("a", "help-menu-link help-menu-settings") as HTMLAnchorElement;
@@ -684,7 +685,7 @@ function renderLoading(): HTMLElement {
 function renderNoPage(): HTMLElement {
   const wrapper = el("div", "state-no-page");
   const text = el("p", "no-page-text");
-  text.textContent = "Navigate to a web page to get started. Distill can't extract content from browser internal pages.";
+  text.textContent = `Navigate to a web page to get started. ${PRODUCT_NAME} can't extract content from browser internal pages.`;
   wrapper.appendChild(text);
   return wrapper;
 }
@@ -940,7 +941,7 @@ function renderMessages(messages: ReadonlyArray<PortConversationMessage>, partia
   for (const msg of messages) {
     const msgEl = el("div", `message message-${msg.role}`);
     const roleLabel = el("span", "message-role");
-    roleLabel.textContent = msg.role === "user" ? "You" : "Distill";
+    roleLabel.textContent = msg.role === "user" ? "You" : ASSISTANT_NAME;
     msgEl.appendChild(roleLabel);
 
     if (msg.role === "assistant" && msg.model) {
@@ -967,7 +968,7 @@ function renderMessages(messages: ReadonlyArray<PortConversationMessage>, partia
   if (partial !== undefined) {
     const partialEl = el("div", "message message-assistant message-partial");
     const roleLabel = el("span", "message-role");
-    roleLabel.textContent = "Distill";
+    roleLabel.textContent = ASSISTANT_NAME;
     partialEl.appendChild(roleLabel);
 
     if (partial) {
@@ -1564,6 +1565,8 @@ function formatRelativeTime(isoString: string): string {
 // ─── Initialization ──────────────────────────────────────────────────────────
 
 async function init(): Promise<void> {
+  document.title = PRODUCT_NAME;
+
   // Esc: close an open picker / help menu, or cancel a running stream
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;

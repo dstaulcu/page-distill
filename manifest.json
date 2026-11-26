@@ -1,8 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "Distill",
+  "name": "__MSG_extName__",
   "version": "4.1.1",
-  "description": "Extract, summarize, and export web page content as Markdown.",
+  "description": "__MSG_extDescription__",
+  "default_locale": "en",
   "browser_specific_settings": {
     "gecko": {
       "id": "distill@example.com",
@@ -38,7 +39,7 @@
   ],
   "sidebar_action": {
     "default_panel": "src/sidebar/sidebar.html",
-    "default_title": "Distill",
+    "default_title": "__MSG_extName__",
     "default_icon": {
       "16": "icons/icon.svg",
       "32": "icons/icon.svg",
@@ -50,7 +51,7 @@
     "open_in_tab": true
   },
   "action": {
-    "default_title": "Toggle Distill Sidebar",
+    "default_title": "__MSG_toggleSidebarTitle__",
     "default_icon": {
       "16": "icons/icon.svg",
       "32": "icons/icon.svg",

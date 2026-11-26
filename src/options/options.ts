@@ -14,6 +14,7 @@ import { backfillDefaults, DEFAULT_SETTINGS } from "@background/settings/default
 import { validateContextWindowTokens } from "@shared/context-window";
 import { getProviderUi, isAiProvider, DEFAULT_AI_PROVIDER } from "@shared/providers";
 import type { AiProvider } from "@shared/types";
+import { PRODUCT_NAME, LOG_PREFIX } from "@shared/branding";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -59,7 +60,18 @@ function $input(id: string): HTMLInputElement {
 // Initialization
 // ---------------------------------------------------------------------------
 
+/** Fill brand names into the page (the HTML carries the same defaults as a no-JS fallback). */
+function applyBranding(): void {
+  document.title = `${PRODUCT_NAME} Settings`;
+  const values: Record<string, string> = { product: PRODUCT_NAME, logPrefix: LOG_PREFIX };
+  for (const node of Array.from(document.querySelectorAll<HTMLElement>("[data-brand]"))) {
+    const value = values[node.dataset.brand ?? ""];
+    if (value !== undefined) node.textContent = value;
+  }
+}
+
 document.addEventListener("DOMContentLoaded", async () => {
+  applyBranding();
   await loadSettings();
   bindEventListeners();
 });

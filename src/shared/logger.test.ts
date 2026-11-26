@@ -1,3 +1,4 @@
+import { LOG_PREFIX } from "./branding";
 import { describe, it, expect, vi } from "vitest";
 import { createLogger, noopLogger } from "./logger";
 
@@ -36,13 +37,13 @@ describe("SF-8 createLogger", () => {
     expect(mockConsole.error).toHaveBeenCalledTimes(1);
   });
 
-  it("prefixes every call with [Distill]", () => {
+  it("prefixes every call with the brand log prefix", () => {
     const mockConsole = makeMockConsole();
     const logger = createLogger({ getEnabled: () => true, console: mockConsole });
 
     logger.debug("hello", { extra: 1 });
 
-    expect(mockConsole.debug).toHaveBeenCalledWith("[Distill]", "hello", { extra: 1 });
+    expect(mockConsole.debug).toHaveBeenCalledWith(LOG_PREFIX, "hello", { extra: 1 });
   });
 
   it("re-evaluates getEnabled on every call rather than caching it at creation", () => {
@@ -56,7 +57,7 @@ describe("SF-8 createLogger", () => {
     enabled = true;
     logger.debug("second");
     expect(mockConsole.debug).toHaveBeenCalledTimes(1);
-    expect(mockConsole.debug).toHaveBeenCalledWith("[Distill]", "second");
+    expect(mockConsole.debug).toHaveBeenCalledWith(LOG_PREFIX, "second");
   });
 
   it("defaults to the global console when none is injected", () => {
@@ -64,7 +65,7 @@ describe("SF-8 createLogger", () => {
     try {
       const logger = createLogger({ getEnabled: () => true });
       logger.debug("via global console");
-      expect(debugSpy).toHaveBeenCalledWith("[Distill]", "via global console");
+      expect(debugSpy).toHaveBeenCalledWith(LOG_PREFIX, "via global console");
     } finally {
       debugSpy.mockRestore();
     }

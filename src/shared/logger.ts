@@ -4,6 +4,8 @@
  * (defaulting to `noopLogger`), so this is purely additive to existing code.
  */
 
+import { LOG_PREFIX } from "./branding";
+
 export interface Logger {
   readonly debug: (...args: unknown[]) => void;
   readonly warn: (...args: unknown[]) => void;
@@ -15,7 +17,7 @@ export interface CreateLoggerOptions {
   readonly console?: Pick<Console, "debug" | "warn" | "error">;
 }
 
-const PREFIX = "[Distill]";
+const PREFIX = LOG_PREFIX;
 
 export function createLogger(opts: CreateLoggerOptions): Logger {
   const target = opts.console ?? console;
