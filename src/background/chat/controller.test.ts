@@ -203,6 +203,16 @@ describe("CF-2/CF-3 createChatController", () => {
   });
 
   describe("init message", () => {
+    it("contextLoaded carries a plain-text excerpt of the extracted page", async () => {
+      const { controller, port } = setup();
+      controller.handleConnect(port);
+      port.messageListeners[0]({ type: "init", tabId: 42 });
+
+      await vi.waitFor(() => expect(port.messages.some((m) => m.type === "contextLoaded")).toBe(true));
+      const loaded = port.messages.find((m) => m.type === "contextLoaded") as { excerpt?: string };
+      expect(loaded.excerpt).toBe("This is the article content.");
+    });
+
     it("extracts content and sends contextLoaded; summarize triggers streaming", async () => {
       const { controller, port, extractContent } = setup();
       controller.handleConnect(port);
@@ -1747,6 +1757,9 @@ describe("CF-3.9 context content budget", () => {
     expect(user).toContain("SECOND_");
     expect(totalChars(ctx.getCaptured())).toBeLessThanOrEqual(1200);
     expect(startMsg(ctx).contextTruncated).toBe(true);
+    const kept = (startMsg(ctx) as { contextKeptPercent?: number }).contextKeptPercent!;
+    expect(kept).toBeGreaterThan(0);
+    expect(kept).toBeLessThan(100);
   });
 
   it("Q&A: shortens tab content so the prompt (system prompt, page-context wrapper, bodies, question) fits the window", async () => {

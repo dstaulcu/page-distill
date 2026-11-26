@@ -110,6 +110,11 @@ let lowConfidence = false; // Whether extraction had low confidence
 let pageWordCount: number | null = null; // Word count of extracted content (for reading-time estimate)
 let configWarning: string | null = null; // Non-blocking AI config warning
 let showHelpMenu = false;
+let pageExcerpt: string | null = null; // Plain-text preview of the extracted page (shown before summarizing)
+let contextKeptPercent: number | null = null; // How much page text survived CF-3.9 shortening, for the notice
+let exportStatusEl: HTMLElement | null = null;
+let focusAfterRender = false; // Put the cursor in the message box after a reply finishes
+let messagesPinnedToBottom = true; // False once the user scrolls up, so streaming stops yanking the view down
 
 // Export sections chosen with the checkboxes in the footer (see renderFooter).
 const exportOptions = { summary: true, content: false, qa: false };
@@ -249,6 +254,7 @@ function handleControllerMessage(msg: ControllerToSidebarMessage): void {
       lowConfidence = msg.confidence === "low";
       hasSavedPattern = msg.hasSavedPattern;
       pageWordCount = msg.wordCount;
+      pageExcerpt = msg.excerpt?.trim() ? msg.excerpt : null;
       render();
       break;
 
@@ -331,6 +337,8 @@ function handleControllerMessage(msg: ControllerToSidebarMessage): void {
 
     case "streamStart":
       logger.debug("Stream started", `historyTruncated=${!!msg.historyTruncated}`, `contextTruncated=${!!msg.contextTruncated}`);
+      contextKeptPercent = msg.contextKeptPercent ?? null;
+      announce("Generating reply");
       if (state.phase === "summarizing") {
         // Stay in summarizing, streaming will come via tokens — but still
         // fold in whether page content was shortened for this request (CF-3.9).
@@ -366,7 +374,7 @@ function handleControllerMessage(msg: ControllerToSidebarMessage): void {
         if (partialEl) {
           partialEl.innerHTML = renderMarkdown(state.partial);
           const list = app.querySelector(".messages-list");
-          if (list) list.scrollTop = list.scrollHeight;
+          if (list && messagesPinnedToBottom) list.scrollTop = list.scrollHeight;
           break; // skip full render — patch only
         }
       }
@@ -376,6 +384,7 @@ function handleControllerMessage(msg: ControllerToSidebarMessage): void {
 
     case "streamEnd": {
       logger.debug("Stream ended", `chars=${msg.fullContent.length}`);
+      announce("Reply complete");
       // An empty fullContent means an aborted stream with nothing received —
       // don't append an empty assistant message.
       const hasContent = msg.fullContent.trim().length > 0;
@@ -391,6 +400,7 @@ function handleControllerMessage(msg: ControllerToSidebarMessage): void {
         state = state.returnPhase === "free-chat"
           ? { phase: "free-chat", messages: newMessages, ...notes }
           : { phase: "ready", messages: newMessages, ...notes };
+        focusAfterRender = true;
       } else if (state.phase === "streaming") {
         const returnPhase = state.returnPhase;
         const newMessages = hasContent ? [...state.messages, endMsg] : [...state.messages];
@@ -400,6 +410,7 @@ function handleControllerMessage(msg: ControllerToSidebarMessage): void {
         } else {
           state = { phase: "ready", messages: newMessages, ...notes };
         }
+        focusAfterRender = true;
       }
       render();
       break;
@@ -407,6 +418,7 @@ function handleControllerMessage(msg: ControllerToSidebarMessage): void {
 
     case "streamError": {
       logger.warn("Stream error", msg.reason, `canRetry=${msg.canRetry}`);
+      announce(`Error: ${msg.reason}`);
       // Keep the conversation visible alongside the error; the controller is
       // the single source of truth for whether retry is still allowed (CF-3.3).
       const prior: { messages: ReadonlyArray<PortConversationMessage>; returnPhase: "ready" | "free-chat" } =
@@ -455,6 +467,10 @@ function handleControllerMessage(msg: ControllerToSidebarMessage): void {
 // ─── Rendering ───────────────────────────────────────────────────────────────
 
 function render(): void {
+  // The whole tree is rebuilt on every render; remember where the user was
+  // reading so a re-render doesn't throw them to the top.
+  const previousList = app.querySelector(".messages-list");
+  const previousScrollTop = previousList ? previousList.scrollTop : null;
   app.innerHTML = "";
 
   const container = el("div", "sidebar-container");
@@ -524,10 +540,34 @@ function render(): void {
 
   app.appendChild(container);
 
-  // Auto-scroll to bottom of messages
+  // Keep following the newest content unless the user scrolled up to read
   const messagesEl = app.querySelector(".messages-list");
   if (messagesEl) {
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    if (messagesPinnedToBottom || previousScrollTop === null) {
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    } else {
+      messagesEl.scrollTop = previousScrollTop;
+    }
+    messagesEl.addEventListener("scroll", () => {
+      messagesPinnedToBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 40;
+      app.querySelector(".scroll-latest")?.classList.toggle("hidden", messagesPinnedToBottom);
+    });
+    if (state.phase === "streaming") {
+      const latestBtn = el("button", "scroll-latest") as HTMLButtonElement;
+      latestBtn.textContent = "↓ Latest";
+      latestBtn.classList.toggle("hidden", messagesPinnedToBottom);
+      latestBtn.addEventListener("click", () => {
+        messagesPinnedToBottom = true;
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+        latestBtn.classList.add("hidden");
+      });
+      container.appendChild(latestBtn);
+    }
+  }
+
+  if (focusAfterRender) {
+    focusAfterRender = false;
+    app.querySelector<HTMLTextAreaElement>(".message-input")?.focus();
   }
 }
 
@@ -540,9 +580,9 @@ function renderHeader(): HTMLElement {
   // Reset button — visible when we have content loaded
   if (state.phase === "ready" || state.phase === "streaming" || state.phase === "summarizing") {
     const resetBtn = el("button", "btn-reset") as HTMLButtonElement;
-    resetBtn.textContent = "↻ Reset";
-    resetBtn.title = "Reset — re-extract current page";
-    resetBtn.setAttribute("aria-label", "Reset — re-extract current page");
+    resetBtn.textContent = "↻";
+    resetBtn.title = "Re-read page — extract the current page again";
+    resetBtn.setAttribute("aria-label", "Re-read page — extract the current page again");
     resetBtn.addEventListener("click", () => {
       if (currentTabId == null) return;
       resetLocalNav();
@@ -572,7 +612,7 @@ function renderHeader(): HTMLElement {
   // Help button — always visible, regardless of phase
   const helpWrapper = el("div", "help-menu");
   const helpBtn = el("button", "btn-help") as HTMLButtonElement;
-  helpBtn.textContent = "❓ Help";
+  helpBtn.textContent = "?";
   helpBtn.title = "Help — version info and links";
   helpBtn.setAttribute("aria-label", "Help — version info and links");
   helpBtn.addEventListener("click", () => {
@@ -725,6 +765,28 @@ function renderReadyNoSummary(): HTMLElement {
 
   wrapper.appendChild(pageInfo);
 
+  // Preview of what was extracted, so a wrong grab is obvious before a summary is spent on it
+  if (pageExcerpt) {
+    const excerpt = el("p", "page-excerpt");
+    excerpt.textContent = pageExcerpt;
+    wrapper.appendChild(excerpt);
+  }
+  if (!lowConfidence) {
+    // (When confidence is low the prominent picker hint below already covers this)
+    const wrongLink = el("a", "wrong-content-link") as HTMLAnchorElement;
+    wrongLink.href = "#";
+    wrongLink.textContent = hasSavedPattern ? "Not the right content? Update selector" : "Not the right content? Pick the area";
+    wrongLink.addEventListener("click", async (e) => {
+      e.preventDefault();
+      const original = wrongLink.textContent!;
+      await activatePicker(
+        () => { wrongLink.textContent = "Selecting…"; },
+        () => { wrongLink.textContent = original; },
+      );
+    });
+    wrapper.appendChild(wrongLink);
+  }
+
   const actions = el("div", "ready-actions");
 
   const summarizeBtn = el("button", "btn btn-summarize") as HTMLButtonElement;
@@ -747,6 +809,14 @@ function renderContextSection(): HTMLElement {
 
   for (const tab of contextTabs) {
     const chip = el("div", "context-chip");
+    chip.dataset.tabId = String(tab.tabId);
+
+    const cachedFavicon = faviconCache.get(tab.tabId);
+    if (cachedFavicon) {
+      chip.appendChild(makeFaviconImg(cachedFavicon));
+    } else if (cachedFavicon === undefined) {
+      requestFavicon(tab.tabId);
+    }
 
     const titleSpan = el("span", "context-chip-title");
     titleSpan.textContent = truncate(tab.title || tab.url, 22);
@@ -880,8 +950,14 @@ function renderMessages(messages: ReadonlyArray<PortConversationMessage>, partia
     }
 
 
+    if (msg.role === "assistant" && msg.content) {
+      const content = msg.content;
+      msgEl.appendChild(makeCopyButton("message-copy", "Copy this reply", () => content));
+    }
+
     const contentEl = el("div", "message-content");
     contentEl.innerHTML = renderMarkdown(msg.content);
+    addCodeCopyButtons(contentEl);
     msgEl.appendChild(contentEl);
 
     wrapper.appendChild(msgEl);
@@ -932,7 +1008,9 @@ function renderContextTruncationNotice(): HTMLElement {
   // configured context window, so each was cut short — surfaced so it is
   // never a silent truncation.
   const wrapper = el("div", "truncation-notice");
-  wrapper.textContent = "Page content was shortened to fit the model's context window.";
+  wrapper.textContent = contextKeptPercent !== null
+    ? `Page content was shortened to fit the model's context window — about ${contextKeptPercent}% of it was read.`
+    : "Page content was shortened to fit the model's context window.";
   return wrapper;
 }
 
@@ -1109,11 +1187,27 @@ function renderConfigError(): HTMLElement {
   icon.textContent = "⚙️";
   wrapper.appendChild(icon);
 
+  const heading = el("h2", "setup-heading");
+  heading.textContent = "Set up your AI provider";
+  wrapper.appendChild(heading);
+
   const reason = el("p", "config-error-reason");
   reason.textContent = configState.reason;
   wrapper.appendChild(reason);
 
-  const link = el("a", "settings-link") as HTMLAnchorElement;
+  const steps = el("ol", "setup-steps");
+  for (const step of [
+    "Choose Ollama (a model on your computer) or an OpenAI-compatible service.",
+    "Enter the server address and pick a model.",
+    "Use Test connection, then Save.",
+  ]) {
+    const li = document.createElement("li");
+    li.textContent = step;
+    steps.appendChild(li);
+  }
+  wrapper.appendChild(steps);
+
+  const link = el("a", "settings-link btn") as HTMLAnchorElement;
   link.textContent = "Open Settings";
   link.href = "#";
   link.addEventListener("click", (e) => {
@@ -1188,6 +1282,8 @@ function renderFooter(): HTMLElement {
           if (payload.ok) {
             logger.debug("Export succeeded", (payload as { filename?: string }).filename);
             exportBtn.textContent = "✓ Exported";
+            const filename = (payload as { filename?: string }).filename;
+            setExportStatus(destination.kind === "clipboard" ? "Copied to clipboard" : filename ? `Saved ${filename}` : "Exported");
             setTimeout(() => { exportBtn.textContent = "Export"; }, 2000);
           } else {
             const failure = payload as { reason?: string; detail?: string };
@@ -1195,6 +1291,7 @@ function renderFooter(): HTMLElement {
             // Say why when the user can act on it (e.g. exporting before summarizing)
             exportBtn.textContent = failure.reason === "nothing-to-export" ? "✗ Nothing to export" : "✗ Failed";
             exportBtn.title = failure.detail ?? "";
+            setExportStatus("");
             setTimeout(() => { exportBtn.textContent = "Export"; exportBtn.title = ""; }, 3000);
           }
         } else {
@@ -1213,6 +1310,12 @@ function renderFooter(): HTMLElement {
     exportSection.appendChild(exportBtn);
 
     footer.appendChild(exportSection);
+
+    // Says where the export went (filename or clipboard) instead of a bare tick
+    const exportStatus = el("div", "export-status");
+    exportStatus.setAttribute("role", "status");
+    footer.appendChild(exportStatus);
+    exportStatusEl = exportStatus;
   }
 
   return footer;
@@ -1283,6 +1386,7 @@ function submitMessage(text: string): void {
     state = { phase: "streaming", messages: [...state.messages, userMsg], partial: "", returnPhase: "free-chat" };
   }
 
+  messagesPinnedToBottom = true; // sending means "follow the reply"
   sendToController({ type: "sendMessage", text: trimmed });
   render();
 }
@@ -1296,6 +1400,9 @@ function resetLocalNav(): void {
   contextTabs = [];
   showTabPicker = false;
   pageWordCount = null;
+  pageExcerpt = null;
+  contextKeptPercent = null;
+  messagesPinnedToBottom = true;
   contextTabError = null;
   if (contextTabErrorTimeout) {
     clearTimeout(contextTabErrorTimeout);
@@ -1338,6 +1445,96 @@ async function activatePicker(onPending: () => void, onCancel: () => void): Prom
   }
 }
 
+// Screen-reader announcements. The chat tree is rebuilt on every render, so a
+// persistent visually-hidden live region outside #app carries status changes
+// (streaming content itself is deliberately not live: it would be re-read on
+// every token).
+function announce(text: string): void {
+  let region = document.getElementById("sr-status");
+  if (!region) {
+    region = document.createElement("div");
+    region.id = "sr-status";
+    region.className = "sr-only";
+    region.setAttribute("role", "status");
+    region.setAttribute("aria-live", "polite");
+    document.body.appendChild(region);
+  }
+  region.textContent = text;
+}
+
+/** Briefly relabel a button ("Copied ✓"), then restore it. */
+function setExportStatus(text: string): void {
+  if (!exportStatusEl) return;
+  exportStatusEl.textContent = text;
+  if (text) {
+    const target = exportStatusEl;
+    setTimeout(() => { if (target.textContent === text) target.textContent = ""; }, 6000);
+  }
+}
+
+function flashButton(btn: HTMLButtonElement, text: string, ms = 1500): void {
+  const original = btn.textContent;
+  btn.textContent = text;
+  setTimeout(() => { btn.textContent = original; }, ms);
+}
+
+function makeCopyButton(className: string, label: string, getText: () => string): HTMLButtonElement {
+  const btn = el("button", className) as HTMLButtonElement;
+  btn.type = "button";
+  btn.textContent = "Copy";
+  btn.title = label;
+  btn.setAttribute("aria-label", label);
+  btn.addEventListener("click", async () => {
+    const ok = await writeToClipboard(getText());
+    flashButton(btn, ok ? "Copied ✓" : "Copy failed");
+  });
+  return btn;
+}
+
+/** Adds a Copy button to every code block inside rendered markdown. */
+function addCodeCopyButtons(container: HTMLElement): void {
+  for (const pre of Array.from(container.querySelectorAll("pre"))) {
+    pre.appendChild(makeCopyButton("code-copy", "Copy code", () => pre.querySelector("code")?.textContent ?? ""));
+  }
+}
+
+// Favicons for the context chips. Looked up lazily and patched into the chip
+// in place — a full render() would wipe whatever the user is typing.
+const faviconCache = new Map<number, string | null>();
+const faviconRequested = new Set<number>();
+
+function safeFaviconUrl(url: unknown): string | null {
+  return typeof url === "string" && /^(https?:|data:image\/)/i.test(url) ? url : null;
+}
+
+function makeFaviconImg(url: string): HTMLImageElement {
+  const img = document.createElement("img");
+  img.className = "context-chip-favicon";
+  img.src = url;
+  img.alt = "";
+  img.setAttribute("aria-hidden", "true");
+  img.addEventListener("error", () => img.remove());
+  return img;
+}
+
+function requestFavicon(tabId: number): void {
+  if (faviconRequested.has(tabId)) return;
+  faviconRequested.add(tabId);
+  const tabsApi = (browser as unknown as { tabs?: { get?: (id: number) => Promise<{ favIconUrl?: string }> } }).tabs;
+  if (typeof tabsApi?.get !== "function") return;
+  tabsApi.get(tabId).then(
+    (tab) => {
+      const url = safeFaviconUrl(tab?.favIconUrl);
+      faviconCache.set(tabId, url);
+      const chip = app.querySelector(`.context-chip[data-tab-id="${tabId}"]`);
+      if (url && chip && !chip.querySelector(".context-chip-favicon")) {
+        chip.insertBefore(makeFaviconImg(url), chip.firstChild);
+      }
+    },
+    () => { faviconCache.set(tabId, null); },
+  );
+}
+
 function el(tag: string, className?: string): HTMLElement {
   const element = document.createElement(tag);
   if (className) {
@@ -1367,6 +1564,18 @@ function formatRelativeTime(isoString: string): string {
 // ─── Initialization ──────────────────────────────────────────────────────────
 
 async function init(): Promise<void> {
+  // Esc: close an open picker / help menu, or cancel a running stream
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (showTabPicker || showHelpMenu) {
+      showTabPicker = false;
+      showHelpMenu = false;
+      render();
+    } else if (state.phase === "streaming" || state.phase === "summarizing") {
+      sendToController({ type: "abort" });
+    }
+  });
+
   // Render initial loading state immediately
   render();
 

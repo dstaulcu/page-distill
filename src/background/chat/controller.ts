@@ -23,7 +23,8 @@ import type {
   StreamingClientOptions,
   ChatMessage,
 } from "./streaming-client";
-import { fitConversationToBudget, fitArticlesToBudget, computeBudgetChars, computeArticleBudgetChars, DEFAULT_CONTEXT_WINDOW_TOKENS } from "./context-budget";
+import { fitConversationToBudget, fitArticlesToBudget, computeBudgetChars, computeArticleBudgetChars, computeKeptPercent, DEFAULT_CONTEXT_WINDOW_TOKENS } from "./context-budget";
+import { makeExcerpt } from "./excerpt";
 import { shortenLinkUrls } from "./link-shortener";
 import type { Logger } from "@shared/logger";
 import { noopLogger } from "@shared/logger";
@@ -304,7 +305,7 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
         contextTabs.set(tabId, { url: article.sourceUrl, title: article.title, content, confidence: extractionResult.confidence });
 
         const patternExists = await hasSavedPattern(article.sourceUrl);
-        send({ type: "contextLoaded", title: article.title, url: article.sourceUrl, confidence: extractionResult.confidence, hasSavedPattern: patternExists, wordCount: Math.round(article.bodyCharacterCount / 5) });
+        send({ type: "contextLoaded", title: article.title, url: article.sourceUrl, confidence: extractionResult.confidence, hasSavedPattern: patternExists, wordCount: Math.round(article.bodyCharacterCount / 5), excerpt: makeExcerpt(article.bodyMarkdown) });
 
         // Initialize tab state
         const now = clock();
@@ -522,7 +523,7 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
 
         abortController = new AbortController();
 
-        send({ type: "streamStart", contextTruncated });
+        send({ type: "streamStart", contextTruncated, contextKeptPercent: computeKeptPercent(articles, keptArticles) });
 
         const result = await client.streamChatCompletion({
           model: settings.ai.modelId,
@@ -740,7 +741,7 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
 
         abortController = new AbortController();
 
-        send({ type: "streamStart", historyTruncated, contextTruncated });
+        send({ type: "streamStart", historyTruncated, contextTruncated, contextKeptPercent: computeKeptPercent(articles, keptArticles) });
 
         const result = await client.streamChatCompletion({
           model: settings.ai.modelId,

@@ -21,10 +21,10 @@ export type SidebarToControllerMessage =
 // ─── Controller → Sidebar Messages ──────────────────────────────────────────
 
 export type ControllerToSidebarMessage =
-  | { readonly type: "contextLoaded"; readonly title: string; readonly url: string; readonly confidence: "high" | "medium" | "low"; readonly hasSavedPattern: boolean; readonly wordCount: number }
+  | { readonly type: "contextLoaded"; readonly title: string; readonly url: string; readonly confidence: "high" | "medium" | "low"; readonly hasSavedPattern: boolean; readonly wordCount: number; readonly excerpt?: string }
   | { readonly type: "contextError"; readonly reason: string; readonly canRetry: boolean }
   | { readonly type: "conversationRestored"; readonly messages: ReadonlyArray<PortConversationMessage> }
-  | { readonly type: "streamStart"; readonly historyTruncated?: boolean; readonly contextTruncated?: boolean }
+  | { readonly type: "streamStart"; readonly historyTruncated?: boolean; readonly contextTruncated?: boolean; readonly contextKeptPercent?: number }
   | { readonly type: "streamToken"; readonly token: string }
   | { readonly type: "streamEnd"; readonly fullContent: string; readonly model?: string }
   | { readonly type: "streamError"; readonly reason: string; readonly partialContent: string; readonly canRetry: boolean }

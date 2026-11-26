@@ -12,6 +12,8 @@ model or any OpenAI-compatible service.
 - **Chat without a page** using "New chat".
 - **Export to Markdown.** Choose what goes in the file: the summary (on by default), the
   page content, and your Q&A.
+- **Copy** any reply, or a single code block, with one click.
+- **Dark mode.** The sidebar follows your system theme.
 - **Fix a bad extraction.** If Distill grabs the wrong part of a page, pick the right
   element with the element picker and it remembers your choice for that site.
 

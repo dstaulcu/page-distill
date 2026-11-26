@@ -150,3 +150,19 @@ export function fitArticlesToBudget(
   });
   return { articles: fitted, contextTruncated };
 }
+
+/**
+ * How much of the page text survived CF-3.9 shortening, as a whole percent
+ * (1–99 when anything was cut, 100 when nothing was). Shown to the user so
+ * "shortened" says how much was actually read.
+ */
+export function computeKeptPercent(
+  original: ReadonlyArray<ExtractedArticle>,
+  kept: ReadonlyArray<ExtractedArticle>,
+): number {
+  const total = original.reduce((n, a) => n + a.bodyMarkdown.length, 0);
+  if (total === 0) return 100;
+  const keptChars = kept.reduce((n, a) => n + a.bodyMarkdown.length, 0);
+  if (keptChars >= total) return 100;
+  return Math.min(99, Math.max(1, Math.round((keptChars / total) * 100)));
+}

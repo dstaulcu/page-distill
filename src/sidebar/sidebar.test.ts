@@ -1074,3 +1074,262 @@ describe("CF-4 export checkboxes: Summary, Content, Q&A", () => {
     expect(boxes().map((b) => b.checked)).toEqual([true, true, false]);
   });
 });
+
+// ─── UX improvements ─────────────────────────────────────────────────────────
+
+describe("UX: copy buttons", () => {
+  const withClipboard = () => {
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, writable: true, configurable: true });
+    return writeText;
+  };
+
+  async function restore(messages: Array<{ role: "user" | "assistant"; content: string }>): Promise<void> {
+    await loadSidebar();
+    emit(contextLoaded);
+    emit({ type: "conversationRestored", messages: messages.map((m) => ({ ...m, timestamp: "t" })) });
+  }
+
+  it("copies an assistant reply's raw markdown, and only assistant replies get the button", async () => {
+    const writeText = withClipboard();
+    await restore([{ role: "user", content: "Q?" }, { role: "assistant", content: "**Answer** text" }]);
+
+    const buttons = app().querySelectorAll(".message-copy");
+    expect(buttons).toHaveLength(1);
+    expect(app().querySelector(".message-user .message-copy")).toBeNull();
+
+    (buttons[0] as HTMLButtonElement).click();
+    await flush();
+
+    expect(writeText).toHaveBeenCalledWith("**Answer** text");
+    expect(buttons[0].textContent).toBe("Copied ✓");
+  });
+
+  it("gives each code block its own Copy button that copies only the code", async () => {
+    const writeText = withClipboard();
+    await restore([{ role: "assistant", content: "Run:\n```\nnpm install\n```\nthen done" }]);
+
+    const codeCopy = app().querySelector(".code-copy") as HTMLButtonElement;
+    expect(codeCopy).not.toBeNull();
+    codeCopy.click();
+    await flush();
+
+    expect(writeText).toHaveBeenCalledTimes(1);
+    const copied = (writeText.mock.calls[0] as unknown as [string])[0];
+    expect(copied).toContain("npm install");
+    expect(copied).not.toContain("Copy");
+  });
+
+  it("reports a failed copy instead of claiming success", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: vi.fn(async () => { throw new Error("denied"); }) },
+      writable: true,
+      configurable: true,
+    });
+    document.execCommand = vi.fn(() => false);
+    await restore([{ role: "assistant", content: "text" }]);
+
+    const btn = app().querySelector(".message-copy") as HTMLButtonElement;
+    btn.click();
+    await flush();
+
+    expect(btn.textContent).toBe("Copy failed");
+  });
+});
+
+describe("UX: header and first-run setup", () => {
+  it("shows Re-read page and Help as labelled icon buttons", async () => {
+    await loadSidebar();
+    emit(contextLoaded);
+
+    const reread = app().querySelector(".btn-reset") as HTMLButtonElement;
+    expect(reread.textContent).toBe("↻");
+    expect(reread.getAttribute("aria-label")).toMatch(/Re-read page/);
+    const help = app().querySelector(".btn-help") as HTMLButtonElement;
+    expect(help.textContent).toBe("?");
+    expect(help.getAttribute("aria-label")).toMatch(/Help/);
+  });
+
+  it("shows a setup card with steps and an Open Settings button when AI isn't configured", async () => {
+    await loadSidebar();
+    emit({ type: "configError", reason: "AI not configured. Set the base URL and model in Settings." });
+
+    expect(app().querySelector(".setup-heading")?.textContent).toBe("Set up your AI provider");
+    expect(app().querySelectorAll(".setup-steps li").length).toBeGreaterThanOrEqual(3);
+    const open = app().querySelector(".settings-link") as HTMLAnchorElement;
+    open.click();
+    expect((globalThis as unknown as { browser: { runtime: { openOptionsPage: ReturnType<typeof vi.fn> } } }).browser.runtime.openOptionsPage).toHaveBeenCalled();
+  });
+});
+
+describe("UX: extraction preview before summarizing", () => {
+  it("shows an excerpt of the extracted page and a 'not the right content' link", async () => {
+    await loadSidebar();
+    emit({ ...contextLoaded, excerpt: "The first lines of the page body." });
+
+    expect(app().querySelector(".page-excerpt")?.textContent).toBe("The first lines of the page body.");
+    expect(app().querySelector(".wrong-content-link")).not.toBeNull();
+  });
+
+  it("omits the excerpt block when none was sent", async () => {
+    await loadSidebar();
+    emit(contextLoaded);
+
+    expect(app().querySelector(".page-excerpt")).toBeNull();
+  });
+
+  it("uses the prominent picker hint, not a second link, when confidence is low", async () => {
+    await loadSidebar();
+    emit({ ...contextLoaded, confidence: "low", excerpt: "x" });
+
+    expect(app().querySelector(".picker-link")).not.toBeNull();
+    expect(app().querySelector(".wrong-content-link")).toBeNull();
+  });
+});
+
+describe("UX: truncation notice says how much was read", () => {
+  it("includes the percentage of the page that fit", async () => {
+    await loadSidebar();
+    emit(contextLoaded);
+    (app().querySelector(".btn-summarize") as HTMLButtonElement).click();
+    emit({ type: "streamStart", contextTruncated: true, contextKeptPercent: 35 });
+    emit({ type: "streamToken", token: "Hi" });
+    emit({ type: "streamEnd", fullContent: "Hi" });
+
+    expect(app().querySelector(".truncation-notice")?.textContent).toContain("about 35%");
+  });
+
+  it("falls back to the plain notice when no percentage is known", async () => {
+    await loadSidebar();
+    emit(contextLoaded);
+    (app().querySelector(".btn-summarize") as HTMLButtonElement).click();
+    emit({ type: "streamStart", contextTruncated: true });
+    emit({ type: "streamEnd", fullContent: "Hi" });
+
+    const text = app().querySelector(".truncation-notice")?.textContent ?? "";
+    expect(text).toContain("shortened");
+    expect(text).not.toContain("%");
+  });
+});
+
+describe("UX: export feedback", () => {
+  async function readyWithSummary(): Promise<void> {
+    await loadSidebar();
+    emit(contextLoaded);
+    emit({ type: "conversationRestored", messages: [{ role: "assistant", content: "S", timestamp: "t" }] });
+  }
+
+  it("says which file was saved", async () => {
+    await readyWithSummary();
+    runtimeSendResponse = { kind: "exportResult", payload: { ok: true, filename: "2026-11-25-my-page.md" } };
+    (app().querySelector(".btn-export") as HTMLButtonElement).click();
+    await flush();
+
+    expect(app().querySelector(".export-status")?.textContent).toBe("Saved 2026-11-25-my-page.md");
+  });
+
+  it("says when the export went to the clipboard", async () => {
+    syncStorageData.settings = { export: { defaultDestination: { kind: "clipboard" } } };
+    await readyWithSummary();
+    runtimeSendResponse = { kind: "exportResult", payload: { ok: true, filename: "x.md" } };
+    (app().querySelector(".btn-export") as HTMLButtonElement).click();
+    await flush();
+
+    expect(app().querySelector(".export-status")?.textContent).toBe("Copied to clipboard");
+  });
+});
+
+describe("UX: keyboard, focus and screen readers", () => {
+  const press = (key: string) => document.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+
+  it("Escape cancels a running summary", async () => {
+    await loadSidebar();
+    emit(contextLoaded);
+    (app().querySelector(".btn-summarize") as HTMLButtonElement).click();
+    mockPort.postMessage.mockClear();
+
+    press("Escape");
+
+    expect(mockPort.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "abort" }));
+  });
+
+  it("Escape closes the Help menu instead of cancelling anything", async () => {
+    await loadSidebar();
+    emit(contextLoaded);
+    (app().querySelector(".btn-help") as HTMLButtonElement).click();
+    expect(app().querySelector(".help-menu-dropdown")).not.toBeNull();
+    mockPort.postMessage.mockClear();
+
+    press("Escape");
+
+    expect(app().querySelector(".help-menu-dropdown")).toBeNull();
+    expect(mockPort.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "abort" }));
+  });
+
+  it("puts the cursor in the message box once a reply finishes", async () => {
+    await loadSidebar();
+    emit(contextLoaded);
+    (app().querySelector(".btn-summarize") as HTMLButtonElement).click();
+    emit({ type: "streamStart" });
+    emit({ type: "streamEnd", fullContent: "Summary" });
+
+    expect(document.activeElement).toBe(app().querySelector(".message-input"));
+  });
+
+  it("announces status changes through a live region without making streamed text live", async () => {
+    await loadSidebar();
+    emit(contextLoaded);
+    (app().querySelector(".btn-summarize") as HTMLButtonElement).click();
+    emit({ type: "streamStart" });
+    const region = document.getElementById("sr-status")!;
+    expect(region.getAttribute("aria-live")).toBe("polite");
+    expect(region.textContent).toBe("Generating reply");
+
+    emit({ type: "streamEnd", fullContent: "Done" });
+    expect(region.textContent).toBe("Reply complete");
+    expect(app().querySelector("[aria-live]")).toBeNull();
+  });
+
+  it("offers a Latest button while streaming, hidden until the user scrolls up", async () => {
+    await loadSidebar();
+    emit(contextLoaded);
+    emit({ type: "conversationRestored", messages: [{ role: "assistant", content: "S", timestamp: "t" }] });
+    expect(app().querySelector(".scroll-latest")).toBeNull();
+
+    emit({ type: "streamStart" });
+    emit({ type: "streamToken", token: "a" });
+
+    const latest = app().querySelector(".scroll-latest");
+    expect(latest).not.toBeNull();
+    // Pinned to the bottom by default, so there is nothing to jump to yet
+    expect(latest!.classList.contains("hidden")).toBe(true);
+  });
+});
+
+describe("UX: context chip favicons", () => {
+  it("adds the tab's favicon to its chip without re-rendering the page", async () => {
+    await loadSidebar();
+    const browserMock = (globalThis as unknown as { browser: { tabs: { get: ReturnType<typeof vi.fn> } } }).browser;
+    browserMock.tabs.get = vi.fn(async (id: number) => ({ id, url: tabUrlById[id], favIconUrl: "https://example.com/favicon.ico" }));
+
+    emit(contextLoaded);
+    await flush();
+
+    const img = app().querySelector(".context-chip .context-chip-favicon") as HTMLImageElement | null;
+    expect(img).not.toBeNull();
+    expect(img!.src).toBe("https://example.com/favicon.ico");
+    expect(img!.getAttribute("aria-hidden")).toBe("true");
+  });
+
+  it("ignores unsafe favicon schemes", async () => {
+    await loadSidebar();
+    const browserMock = (globalThis as unknown as { browser: { tabs: { get: ReturnType<typeof vi.fn> } } }).browser;
+    browserMock.tabs.get = vi.fn(async (id: number) => ({ id, url: tabUrlById[id], favIconUrl: "javascript:alert(1)" }));
+
+    emit(contextLoaded);
+    await flush();
+
+    expect(app().querySelector(".context-chip-favicon")).toBeNull();
+  });
+});
+

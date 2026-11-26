@@ -6,6 +6,7 @@ import {
   MIN_ARTICLE_BODY_CHARS,
   ARTICLE_FRAMING_SLACK_CHARS,
   computeArticleBudgetChars,
+  computeKeptPercent,
   DEFAULT_CONTEXT_WINDOW_TOKENS,
   CHARS_PER_TOKEN_ESTIMATE,
   RESPONSE_RESERVE_FRACTION,
@@ -190,4 +191,28 @@ describe("CF-3.9 computeArticleBudgetChars", () => {
     );
   });
 
+});
+
+describe("CF-3.9 computeKeptPercent", () => {
+  const art = (body: string): ExtractedArticle => ({
+    title: "t", author: null, publicationDate: null, sourceUrl: "https://e.com", siteName: "",
+    bodyMarkdown: body, bodyCharacterCount: body.length,
+  });
+
+  it("is 100 when nothing was cut", () => {
+    expect(computeKeptPercent([art("x".repeat(100))], [art("x".repeat(100))])).toBe(100);
+  });
+
+  it("reports the share of body text that survived, across all articles", () => {
+    expect(computeKeptPercent([art("a".repeat(600)), art("b".repeat(400))], [art("a".repeat(200)), art("b".repeat(100))])).toBe(30);
+  });
+
+  it("never reports 0 or 100 when something was cut", () => {
+    expect(computeKeptPercent([art("a".repeat(10000))], [art("a")])).toBe(1);
+    expect(computeKeptPercent([art("a".repeat(1000))], [art("a".repeat(999))])).toBe(99);
+  });
+
+  it("is 100 for empty input", () => {
+    expect(computeKeptPercent([], [])).toBe(100);
+  });
 });
