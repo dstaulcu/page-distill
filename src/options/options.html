@@ -17,8 +17,17 @@
       <section class="settings-section" id="section-ai">
         <h2>AI Endpoint</h2>
         <div class="form-group">
+          <label for="ai-provider">Provider</label>
+          <select id="ai-provider">
+            <option value="ollama">Ollama</option>
+            <option value="openai-compatible">OpenAI-compatible</option>
+          </select>
+          <span class="hint" id="ai-provider-hint"></span>
+          <span class="field-error" id="error-ai-provider"></span>
+        </div>
+        <div class="form-group">
           <label for="ai-base-url">Base URL</label>
-          <input type="url" id="ai-base-url" placeholder="https://api.openai.com" autocomplete="off" />
+          <input type="url" id="ai-base-url" placeholder="http://localhost:11434" autocomplete="off" />
           <span class="field-error" id="error-ai-base-url"></span>
         </div>
         <div class="form-group">
@@ -34,51 +43,18 @@
         </div>
         <div class="form-group">
           <label for="ai-api-key">API Key</label>
-          <input type="password" id="ai-api-key" placeholder="sk-..." autocomplete="off" />
+          <input type="password" id="ai-api-key" placeholder="Optional — leave empty for a local server" autocomplete="off" />
           <span class="field-error" id="error-ai-api-key"></span>
+        </div>
+        <div class="form-group" id="group-ai-context-window">
+          <label for="ai-context-window">Context window (tokens)</label>
+          <input type="number" id="ai-context-window" min="512" max="10000000" step="1" placeholder="8192" autocomplete="off" />
+          <span class="hint">Your model's real context window. Used only by the Ollama provider: it is sent as <code>num_ctx</code>, and Distill trims the oldest chat turns and shortens long pages to fit (about 3 characters of prompt per token). OpenAI-compatible servers are never trimmed.</span>
+          <span class="field-error" id="error-ai-context-window"></span>
         </div>
         <div class="form-group form-actions">
           <button id="btn-test-connection" type="button">Test Connection</button>
           <span class="connection-status" id="connection-status"></span>
-        </div>
-      </section>
-
-      <!-- Skill Library & Personas -->
-      <section class="settings-section" id="section-skills">
-        <h2>Skill Library</h2>
-        <p class="section-description">Upload skill files (.md) to persist across sessions (max 20).</p>
-        <div id="skills-list" class="skills-list"></div>
-        <div class="form-group form-actions">
-          <button id="btn-add-skill" type="button">Upload Skill</button>
-          <input type="file" id="skill-file-input" accept=".md" style="display:none" />
-        </div>
-
-        <h3>Personas</h3>
-        <p class="section-description">Named combinations of skills that activate together (max 10).</p>
-        <div id="personas-list" class="personas-list"></div>
-        <div class="form-group form-actions">
-          <button id="btn-add-persona" type="button">Create Persona</button>
-        </div>
-        <!-- Persona editor (hidden) -->
-        <div id="persona-editor" class="persona-editor hidden">
-          <h4 id="persona-editor-title">Create Persona</h4>
-          <div class="form-group">
-            <label for="persona-name">Name</label>
-            <input type="text" id="persona-name" maxlength="64" />
-            <span class="field-error" id="error-persona-name"></span>
-          </div>
-          <div class="form-group">
-            <label for="persona-description">Description</label>
-            <input type="text" id="persona-description" maxlength="200" />
-          </div>
-          <div class="form-group">
-            <label>Skills (order determines primary voice)</label>
-            <div id="persona-skill-checkboxes" class="checkbox-group"></div>
-          </div>
-          <div class="form-group form-actions">
-            <button id="btn-save-persona" type="button">Save</button>
-            <button id="btn-cancel-persona" type="button" class="btn-secondary">Cancel</button>
-          </div>
         </div>
       </section>
 
@@ -136,11 +112,20 @@
         </div>
       </section>
 
-      <!-- Auto-Export Configurations -->
-      <section class="settings-section" id="section-auto-export">
-        <h2>Auto-Export Configurations</h2>
-        <p class="section-description">Sites configured for automatic periodic export.</p>
-        <div id="auto-export-list" class="auto-export-list"></div>
+      <!-- Debugging -->
+      <section class="settings-section" id="section-debugging">
+        <h2>Debugging</h2>
+        <div class="form-group">
+          <label class="checkbox-label">
+            <input type="checkbox" id="debug-logging-enabled" />
+            Enable debug logging
+          </label>
+          <span class="hint">
+            Writes [Distill]-prefixed messages to the browser console: the background
+            page's console (about:debugging → This Firefox → Inspect), and this page's
+            or the sidebar's own devtools console. Off by default.
+          </span>
+        </div>
       </section>
 
       <!-- Save Button -->

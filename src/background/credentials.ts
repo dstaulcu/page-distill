@@ -11,6 +11,8 @@
 import type { Settings } from "@shared/types";
 import type { SecureStore } from "./secure-store";
 import type { PartialSettings, SettingsUpdateResult } from "./settings/manager";
+import type { Logger } from "@shared/logger";
+import { noopLogger } from "@shared/logger";
 
 export type ApiKeySaveResult =
   | { readonly ok: true; readonly ref: string }
@@ -20,10 +22,12 @@ export interface CreateApiKeySaverOptions {
   readonly getSettings: () => Promise<Settings>;
   readonly updateSettings: (patch: PartialSettings) => Promise<SettingsUpdateResult>;
   readonly secureStore: SecureStore;
+  readonly logger?: Logger;
 }
 
 export function createApiKeySaver(opts: CreateApiKeySaverOptions) {
   const { getSettings, updateSettings, secureStore } = opts;
+  const logger = opts.logger ?? noopLogger;
 
   return async function saveApiKey(apiKey: string): Promise<ApiKeySaveResult> {
     const trimmed = apiKey.trim();
@@ -42,14 +46,17 @@ export function createApiKeySaver(opts: CreateApiKeySaverOptions) {
       if (!updateResult.ok) {
         // Roll back the orphaned secret so we don't leak unreferenced entries
         await secureStore.deleteSecret(ref);
+        const detail = updateResult.errors.map((e) => e.message).join("; ");
+        logger.warn("API key save failed: settings update rejected, secret rolled back", detail);
         return {
           ok: false,
           reason: "settings-update-failed",
-          detail: updateResult.errors.map((e) => e.message).join("; "),
+          detail,
         };
       }
     }
 
+    logger.debug("API key saved", `ref=${ref}`);
     return { ok: true, ref };
   };
 }

@@ -6,11 +6,15 @@
  * all extension contexts on successful update.
  */
 
-import type { Settings, AutoExportConfig } from "@shared/types";
+import type { Settings } from "@shared/types";
 import type { StorageAdapter } from "@shared/storage";
 import { createSyncStorageAdapter, createLocalStorageAdapter } from "@shared/storage";
 import { buildMessage } from "@shared/messages";
-import { DEFAULT_SETTINGS, SETTINGS_STORAGE_KEY } from "./defaults";
+import type { Logger } from "@shared/logger";
+import { noopLogger } from "@shared/logger";
+import { DEFAULT_SETTINGS, SETTINGS_STORAGE_KEY, backfillDefaults } from "./defaults";
+import { validateContextWindowTokens } from "@shared/context-window";
+import { isAiProvider } from "@shared/providers";
 
 // ---------------------------------------------------------------------------
 // Public Interface
@@ -36,6 +40,7 @@ export interface CreateSettingsManagerOptions {
   readonly syncStorage?: StorageAdapter;
   readonly localStorage?: StorageAdapter;
   readonly broadcast?: (settings: Settings) => void;
+  readonly logger?: Logger;
 }
 
 // ---------------------------------------------------------------------------
@@ -46,7 +51,7 @@ export type PartialSettings = {
   readonly ai?: Partial<Settings["ai"]>;
   readonly export?: Partial<Settings["export"]>;
   readonly sitePatterns?: Settings["sitePatterns"];
-  readonly autoExportConfigs?: Settings["autoExportConfigs"];
+  readonly debugLogging?: Settings["debugLogging"];
 };
 
 // ---------------------------------------------------------------------------
@@ -56,7 +61,8 @@ export type PartialSettings = {
 export function createSettingsManager(opts?: CreateSettingsManagerOptions): SettingsManager {
   const syncStorage = opts?.syncStorage ?? getDefaultSyncStorage();
   const localStorage = opts?.localStorage ?? getDefaultLocalStorage();
-  const broadcast = opts?.broadcast ?? defaultBroadcast;
+  const broadcast = opts?.broadcast ?? broadcastSettingsChanged;
+  const logger = opts?.logger ?? noopLogger;
 
   let usingSyncStorage = true;
   const listeners: Array<(settings: Settings) => void> = [];
@@ -72,13 +78,13 @@ export function createSettingsManager(opts?: CreateSettingsManagerOptions): Sett
       // fallback flag resets with the background page).
       if (usingSyncStorage) {
         const fromSync = await syncStorage.get<Settings>(SETTINGS_STORAGE_KEY);
-        if (fromSync) return fromSync;
+        if (fromSync) return backfillDefaults(fromSync);
         const fromLocal = await localStorage.get<Settings>(SETTINGS_STORAGE_KEY);
-        if (fromLocal) return fromLocal;
+        if (fromLocal) return backfillDefaults(fromLocal);
         return DEFAULT_SETTINGS;
       }
       const stored = await localStorage.get<Settings>(SETTINGS_STORAGE_KEY);
-      if (stored) return stored;
+      if (stored) return backfillDefaults(stored);
       return DEFAULT_SETTINGS;
     },
 
@@ -92,6 +98,7 @@ export function createSettingsManager(opts?: CreateSettingsManagerOptions): Sett
       // 3. Validate merged settings
       const errors = validateSettings(merged);
       if (errors.length > 0) {
+        logger.warn("Settings update rejected: validation failed", errors);
         return { ok: false, reason: "validation-failed", errors };
       }
 
@@ -99,24 +106,29 @@ export function createSettingsManager(opts?: CreateSettingsManagerOptions): Sett
       if (usingSyncStorage) {
         const syncResult = await syncStorage.set(SETTINGS_STORAGE_KEY, merged);
         if (!syncResult.ok && syncResult.reason === "quota-exceeded") {
+          logger.warn("Sync storage quota exceeded — falling back to local storage");
           usingSyncStorage = false;
           const localResult = await localStorage.set(SETTINGS_STORAGE_KEY, merged);
           if (!localResult.ok) {
             // Storage error — should not happen in practice
+            logger.error("Settings save failed after quota fallback", localResult.detail);
             return { ok: false, reason: "storage-error", errors: [{ field: "_storage", message: localResult.detail }] };
           }
         } else if (!syncResult.ok) {
+          logger.error("Settings save failed", syncResult.detail);
           return { ok: false, reason: "storage-error", errors: [{ field: "_storage", message: syncResult.detail }] };
         }
       } else {
         const localResult = await localStorage.set(SETTINGS_STORAGE_KEY, merged);
         if (!localResult.ok) {
+          logger.error("Settings save failed", localResult.detail);
           return { ok: false, reason: "storage-error", errors: [{ field: "_storage", message: localResult.detail }] };
         }
       }
 
       // 5. Broadcast to all contexts
       broadcast(merged);
+      logger.debug("Settings saved", usingSyncStorage ? "(sync)" : "(local)");
 
       // 6. Notify local listeners
       for (const cb of listeners) {
@@ -151,10 +163,12 @@ function mergeSettings(current: Settings, patch: PartialSettings): Settings {
     schemaVersion: current.schemaVersion,
     ai: patch.ai
       ? {
+          provider: patch.ai.provider ?? current.ai.provider,
           baseUrl: patch.ai.baseUrl ?? current.ai.baseUrl,
           modelId: patch.ai.modelId ?? current.ai.modelId,
           apiKeyRef: patch.ai.apiKeyRef !== undefined ? patch.ai.apiKeyRef : current.ai.apiKeyRef,
           systemPrompt: patch.ai.systemPrompt ?? current.ai.systemPrompt,
+          contextWindowTokens: patch.ai.contextWindowTokens ?? current.ai.contextWindowTokens,
         }
       : current.ai,
     export: patch.export
@@ -165,7 +179,7 @@ function mergeSettings(current: Settings, patch: PartialSettings): Settings {
         }
       : current.export,
     sitePatterns: patch.sitePatterns !== undefined ? patch.sitePatterns : current.sitePatterns,
-    autoExportConfigs: patch.autoExportConfigs !== undefined ? patch.autoExportConfigs : current.autoExportConfigs,
+    debugLogging: patch.debugLogging !== undefined ? patch.debugLogging : current.debugLogging,
   };
 }
 
@@ -176,12 +190,23 @@ function mergeSettings(current: Settings, patch: PartialSettings): Settings {
 export function validateSettings(settings: Settings): ReadonlyArray<FieldError> {
   const errors: FieldError[] = [];
 
+  // AI provider: one of the known provider ids (CF-5.7)
+  if (!isAiProvider(settings.ai.provider)) {
+    errors.push({ field: "ai.provider", message: "Provider must be Ollama or OpenAI-compatible" });
+  }
+
   // AI base URL: must start with http:// or https:// when non-empty
   if (settings.ai.baseUrl !== "" && !/^https?:\/\//.test(settings.ai.baseUrl)) {
     errors.push({
       field: "ai.baseUrl",
       message: "Base URL must start with http:// or https://",
     });
+  }
+
+  // AI context window: integer within sane bounds (CF-5.6)
+  const contextWindowError = validateContextWindowTokens(settings.ai.contextWindowTokens);
+  if (contextWindowError) {
+    errors.push({ field: "ai.contextWindowTokens", message: contextWindowError });
   }
 
   // Filename pattern: must be non-empty
@@ -201,18 +226,6 @@ export function validateSettings(settings: Settings): ReadonlyArray<FieldError> 
     });
   }
 
-  // Auto-export configs: validate interval for each config
-  for (let i = 0; i < settings.autoExportConfigs.length; i++) {
-    const config = settings.autoExportConfigs[i];
-    const interval = config.intervalMinutes;
-    if (!Number.isInteger(interval) || interval < 1 || interval > 120) {
-      errors.push({
-        field: `autoExportConfigs[${i}].intervalMinutes`,
-        message: "Auto-export interval must be an integer between 1 and 120 minutes",
-      });
-    }
-  }
-
   return errors;
 }
 
@@ -228,9 +241,29 @@ function getDefaultLocalStorage(): StorageAdapter {
   return createLocalStorageAdapter();
 }
 
-function defaultBroadcast(settings: Settings): void {
+/**
+ * Tells every context a settings change happened: extension pages (sidebar,
+ * options) get the full settings via runtime.sendMessage; content scripts —
+ * reachable only through tabs.sendMessage — get just the debug-logging flag,
+ * so site patterns and credential refs never fan out into
+ * every open page's context. Failures are ignored —
+ * most tabs have no listener, and a missed broadcast only delays the change
+ * until that context reloads.
+ */
+export async function broadcastSettingsChanged(settings: Settings): Promise<void> {
   const msg = buildMessage("settingsChanged", settings);
-  browser.runtime.sendMessage(msg).catch(() => {
-    // Ignore errors when no listeners are available
-  });
+  const tabMsg = buildMessage("debugLoggingChanged", { enabled: settings.debugLogging });
+  await Promise.resolve(browser.runtime.sendMessage(msg)).catch(() => {});
+  try {
+    const tabs = await browser.tabs.query({});
+    await Promise.all(
+      tabs.flatMap((t) =>
+        t.id === undefined
+          ? []
+          : [Promise.resolve(browser.tabs.sendMessage(t.id, tabMsg)).catch(() => {})],
+      ),
+    );
+  } catch {
+    // tabs.query unavailable — nothing more to notify
+  }
 }

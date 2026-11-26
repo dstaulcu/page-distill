@@ -13,6 +13,8 @@ import type { ExtractionResult } from "@content/extractor/extract";
 import type { MessageOf } from "@shared/messages";
 import { buildMessage } from "@shared/messages";
 import { matchSitePattern, patternMatchesUrl } from "./site-patterns/matcher";
+import type { Logger } from "@shared/logger";
+import { noopLogger } from "@shared/logger";
 
 export interface ExtractionServiceDeps {
   /** Resolves a tab's current URL; rejects/throws when the tab is inaccessible. */
@@ -24,6 +26,7 @@ export interface ExtractionServiceDeps {
   readonly updateSitePatterns: (patterns: ReadonlyArray<SitePattern>) => Promise<void>;
   /** Content-script response timeout; defaults to 10 s (CF-1.6). */
   readonly timeoutMs?: number;
+  readonly logger?: Logger;
 }
 
 export interface ExtractionService {
@@ -36,6 +39,7 @@ const PRIVILEGED_PREFIXES = ["about:", "moz-extension:", "chrome:"];
 
 export function createExtractionService(deps: ExtractionServiceDeps): ExtractionService {
   const timeoutMs = deps.timeoutMs ?? 10_000;
+  const logger = deps.logger ?? noopLogger;
 
   async function markPatternStale(url: string, selector: string): Promise<void> {
     const settings = await deps.getSettings();
@@ -96,18 +100,21 @@ export function createExtractionService(deps: ExtractionServiceDeps): Extraction
           if (result.stalePattern && selector && tabUrl) {
             markPatternStale(tabUrl, selector);
           }
+          logger.debug("Extraction succeeded for tab", tabId, `confidence=${result.confidence}`);
           return {
             ok: true,
             article: result.article!,
             confidence: result.confidence!,
           };
         }
+        logger.warn("Extraction failed for tab", tabId, result.reason, result.detail);
         return {
           ok: false,
           reason: (result.reason as "no-content-detected" | "extraction-error") ?? "extraction-error",
           detail: result.detail ?? "Extraction failed",
         };
       }
+      logger.warn("Extraction failed for tab", tabId, "no response from content script");
       return { ok: false, reason: "extraction-error", detail: "No response from content script" };
     },
 

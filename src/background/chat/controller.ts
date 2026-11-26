@@ -8,25 +8,24 @@
  * All external dependencies are injected via the options object for testability.
  */
 
-import type { Settings, TabState, Conversation, ConversationMessage, SkillDefinition, ExtractedArticle, ContextTabSnapshot } from "@shared/types";
+import type { Settings, TabState, Conversation, ConversationMessage, ExtractedArticle, ContextTabSnapshot } from "@shared/types";
 import type {
   SidebarToControllerMessage,
   ControllerToSidebarMessage,
   PortConversationMessage,
-  SkillLibrarySnapshot,
 } from "@shared/port-protocol";
 import { isSidebarToControllerMessage } from "@shared/port-protocol";
 import type { ExtractionResult } from "@content/extractor/extract";
 import type { TabStateManager } from "@background/tab-state";
-import type { SkillLibraryManager } from "@background/skill-library";
 import type { SecureStore } from "@background/secure-store";
 import type {
   StreamingAiClient,
   StreamingClientOptions,
   ChatMessage,
 } from "./streaming-client";
-import { parseSkillFile } from "@shared/skill-parser";
-import { buildCompositePrompt } from "@shared/composite-prompt";
+import { fitConversationToBudget, fitArticlesToBudget, computeBudgetChars, computeArticleBudgetChars, DEFAULT_CONTEXT_WINDOW_TOKENS } from "./context-budget";
+import type { Logger } from "@shared/logger";
+import { noopLogger } from "@shared/logger";
 
 // ---------------------------------------------------------------------------
 // Public Interface
@@ -43,10 +42,10 @@ export interface CreateChatControllerOptions {
   readonly extractContent: (tabId: number, selector?: string) => Promise<ExtractionResult>;
   readonly createStreamingClient: (opts: StreamingClientOptions) => StreamingAiClient;
   readonly tabState: TabStateManager;
-  readonly skillLibrary: SkillLibraryManager;
   readonly hasSavedPattern?: (url: string) => Promise<boolean>;
   readonly queryOpenTabs?: () => Promise<ReadonlyArray<{ readonly tabId: number; readonly title: string; readonly url: string }>>;
   readonly clock?: () => string; // ISO timestamp
+  readonly logger?: Logger;
 }
 
 // ---------------------------------------------------------------------------
@@ -84,15 +83,20 @@ interface ContextTabEntry {
 const MAX_CONSECUTIVE_FAILURES = 3;
 const MAX_PAGE_CONTENT_CHARS = 50_000;
 
+/** Fixed text around page content in Q&A — counted by the CF-3.9 budget. */
+const PAGE_CONTEXT_PREFIX = "Here is the page content for context:\n\n";
+const PAGE_CONTEXT_ACK = "I've read the page content. How can I help you?";
+
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
 
 export function createChatController(opts: CreateChatControllerOptions): ChatController {
-  const { getSettings, getSecureStore, extractContent, createStreamingClient, tabState, skillLibrary } = opts;
+  const { getSettings, getSecureStore, extractContent, createStreamingClient, tabState } = opts;
   const hasSavedPattern = opts.hasSavedPattern ?? (async () => false);
   const queryOpenTabs = opts.queryOpenTabs ?? (async () => []);
   const clock = opts.clock ?? (() => new Date().toISOString());
+  const logger = opts.logger ?? noopLogger;
 
   return {
     handleConnect(port: Port): void {
@@ -101,13 +105,6 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
       let lastUserMessage: string | null = null;
       // Map of tabId → context entry (replaces single pageContent variable)
       const contextTabs = new Map<number, ContextTabEntry>();
-      let activeSkills: SkillDefinition[] = [];
-
-      // Initialize activeSkills from persisted library
-      skillLibrary.getActiveSkills().then((skills) => {
-        activeSkills = skills;
-      });
-
       const send = (msg: ControllerToSidebarMessage): void => {
         port.postMessage(msg);
       };
@@ -132,24 +129,6 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
           case "retry":
             handleRetry();
             break;
-          case "loadSkill":
-            handleLoadSkill((msg as { raw: string }).raw);
-            break;
-          case "clearSkill":
-            handleDeactivate();
-            break;
-          case "getLibrary":
-            handleGetLibrary();
-            break;
-          case "activateSkill":
-            handleActivateSkill((msg as { skillId: string }).skillId);
-            break;
-          case "activatePersona":
-            handleActivatePersona((msg as { personaId: string }).personaId);
-            break;
-          case "deactivate":
-            handleDeactivate();
-            break;
           case "addContextTab":
             handleAddContextTab((msg as { tabId: number }).tabId);
             break;
@@ -159,7 +138,6 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
           case "getOpenTabs":
             handleGetOpenTabs();
             break;
-          // autoExport messages are handled elsewhere
           default:
             break;
         }
@@ -185,7 +163,7 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
       // Restores previously-added secondary context tabs (SF-1) from a
       // persisted snapshot — content is left null and lazily re-extracted
       // on demand (ensureContextContent), same as the primary tab restore.
-      // Must run AFTER the mode-establishing message (personaModeReady /
+      // Must run AFTER the mode-establishing message (freeChatReady /
       // conversationRestored) so the sidebar doesn't wipe these chips via
       // its own "start of a fresh session" reset logic.
       function restoreContextTabs(snapshots: ReadonlyArray<ContextTabSnapshot> | undefined): void {
@@ -218,11 +196,11 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
           abortController = null;
         }
 
-        // Special case: about:blank → persona chat mode (no extraction)
+        // Special case: about:blank → free-chat mode (no page, no extraction)
         if (initUrl === "about:blank") {
           const cached = tabState.get(tabId);
           if (cached && cached.url === "about:blank") {
-            // Restore cached persona-mode conversation
+            // Restore cached free-chat conversation
             const messages: PortConversationMessage[] = cached.conversation.messages.map((m) => ({
               role: m.role,
               content: m.content,
@@ -230,12 +208,12 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
               isPartial: m.isPartial,
               model: m.model,
             }));
-            send({ type: "personaModeReady", messages });
+            send({ type: "freeChatReady", messages });
             restoreContextTabs(cached.contextTabs);
             return;
           }
 
-          // New persona-chat session
+          // New free-chat session
           if (cached) {
             tabState.remove(tabId);
           }
@@ -243,21 +221,21 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
           const conversation: Conversation = {
             tabId,
             url: "about:blank",
-            title: "Persona Chat",
+            title: "Chat",
             messages: [],
             createdAt: now,
             updatedAt: now,
           };
           tabState.set(tabId, {
             url: "about:blank",
-            title: "Persona Chat",
+            title: "Chat",
             summary: null,
             conversation,
             extractionConfidence: null,
             consecutiveFailures: 0,
           });
 
-          send({ type: "personaModeReady" });
+          send({ type: "freeChatReady" });
 
           const settings = await getSettings();
           if (!settings.ai.baseUrl || !settings.ai.modelId) {
@@ -302,15 +280,14 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
         try {
           extractionResult = await extractContent(tabId);
         } catch (err) {
-          send({
-            type: "contextError",
-            reason: err instanceof Error ? err.message : "Content extraction failed",
-            canRetry: true,
-          });
+          const reason = err instanceof Error ? err.message : "Content extraction failed";
+          logger.warn("Extraction threw for tab", tabId, reason);
+          send({ type: "contextError", reason, canRetry: true });
           return;
         }
 
         if (!extractionResult.ok) {
+          logger.warn("Extraction failed for tab", tabId, extractionResult.reason, extractionResult.detail);
           send({
             type: "contextError",
             reason: extractionResult.detail,
@@ -320,6 +297,7 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
         }
 
         const article = extractionResult.article;
+        logger.debug("Extraction succeeded for tab", tabId, `confidence=${extractionResult.confidence}`, `chars=${article.bodyCharacterCount}`);
         const content = article.bodyMarkdown.slice(0, MAX_PAGE_CONTENT_CHARS);
 
         contextTabs.set(tabId, { url: article.sourceUrl, title: article.title, content, confidence: extractionResult.confidence });
@@ -381,17 +359,20 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
         try {
           extractionResult = await extractContent(tabId);
         } catch (err) {
+          const reason = err instanceof Error ? err.message : "Content extraction failed";
+          logger.warn("Context tab extraction threw for tab", tabId, reason);
           send({
             type: "contextTabFailed",
             tabId,
             url: tabUrl,
             title: tabTitle || `Tab ${tabId}`,
-            reason: err instanceof Error ? err.message : "Content extraction failed",
+            reason,
           });
           return;
         }
 
         if (!extractionResult.ok) {
+          logger.warn("Context tab extraction failed for tab", tabId, extractionResult.reason, extractionResult.detail);
           send({
             type: "contextTabFailed",
             tabId,
@@ -476,10 +457,6 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
           return;
         }
 
-        // Refresh from the library so activations/deletions made in the
-        // options page take effect without reconnecting the sidebar
-        activeSkills = await skillLibrary.getActiveSkills();
-
         await ensureContextContent();
         const articles = buildContextArticles();
 
@@ -508,14 +485,34 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
 
         const client = createStreamingClient({
           baseUrl: settings.ai.baseUrl,
+          provider: settings.ai.provider,
           apiKey: apiKey ?? "",
+          contextWindowTokens: settings.ai.contextWindowTokens,
+          logger,
         });
 
-        const systemPrompt = activeSkills.length > 0
-          ? buildCompositePrompt({ skills: activeSkills, articles })
-          : settings.ai.systemPrompt || buildDefaultSystemPrompt(articles.length);
+        const budgetChars = getBudgetChars(settings);
+        // CF-3.9: bodies only get what's left after the system prompt text and
+        // the summarize instruction (both measured with bodies emptied — the
+        // instruction already carries each article's title/URL framing).
+        const bodilessArticles = articles.map((a) => ({ ...a, bodyMarkdown: "" }));
+        const fixedChars =
+          buildSystemPrompt(settings, articles.length).length +
+          buildSummarizationUserMessage(bodilessArticles).length;
+        const articleBudgetChars = computeArticleBudgetChars(budgetChars, fixedChars);
+        const { articles: keptArticles, contextTruncated } = fitArticlesToBudget(articles, articleBudgetChars);
+        if (contextTruncated) {
+          logger.debug(
+            "CF-3.9: shortened page content to fit the budget",
+            `articles=${articles.length}`,
+            `budgetChars=${budgetChars}`,
+            `articleBudgetChars=${articleBudgetChars}`,
+          );
+        }
 
-        const userContent = buildSummarizationUserMessage(articles);
+        const systemPrompt = buildSystemPrompt(settings, keptArticles.length);
+
+        const userContent = buildSummarizationUserMessage(keptArticles);
 
         const messages: ChatMessage[] = [
           { role: "system", content: systemPrompt },
@@ -524,7 +521,7 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
 
         abortController = new AbortController();
 
-        send({ type: "streamStart" });
+        send({ type: "streamStart", contextTruncated });
 
         const result = await client.streamChatCompletion({
           model: settings.ai.modelId,
@@ -589,6 +586,10 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
             // the third consecutive failure disables retry (CF-3.3)
             incrementFailures();
             const canRetry = getConsecutiveFailures() < MAX_CONSECUTIVE_FAILURES;
+            logger.warn("Summarize stream failed", result.reason, result.detail, `canRetry=${canRetry}`);
+            if (!canRetry) {
+              logger.warn("Retry exhausted after 3 consecutive failures (summarize)");
+            }
             send({
               type: "streamError",
               reason: result.detail,
@@ -615,6 +616,7 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
 
         // Check AI configuration
         if (!settings.ai.baseUrl || !settings.ai.modelId) {
+          logger.debug("Q&A blocked: AI endpoint not configured");
           send({ type: "configError", reason: "AI endpoint not configured. Please set the base URL and model ID in Settings." });
           return;
         }
@@ -626,59 +628,95 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
 
         const client = createStreamingClient({
           baseUrl: settings.ai.baseUrl,
+          provider: settings.ai.provider,
           apiKey: apiKey ?? "",
+          contextWindowTokens: settings.ai.contextWindowTokens,
+          logger,
         });
-
-        // Refresh from the library so activations/deletions made in the
-        // options page take effect without reconnecting the sidebar
-        activeSkills = await skillLibrary.getActiveSkills();
 
         // Ensure context tab content is loaded (lazy re-extraction for cached sessions)
         await ensureContextContent();
         const articles = buildContextArticles();
 
+        const budgetChars = getBudgetChars(settings);
+        // CF-3.9: bodies only get what's left after the system prompt text and
+        // the new user message (history is trimmed separately, CF-3.8).
+        // The bodies travel in a separate page-context message: a fixed prefix,
+        // an assistant acknowledgement, and per-article title/URL framing.
+        const pageContextFixedChars = articles.length > 0
+          ? PAGE_CONTEXT_PREFIX.length + PAGE_CONTEXT_ACK.length
+          : 0;
+        const fixedChars = buildSystemPrompt(settings, articles.length).length + text.length + pageContextFixedChars;
+        const articleBudgetChars = computeArticleBudgetChars(budgetChars, fixedChars, articles);
+        const { articles: keptArticles, contextTruncated } = fitArticlesToBudget(articles, articleBudgetChars);
+        if (contextTruncated) {
+          logger.debug(
+            "CF-3.9: shortened page content to fit the budget",
+            `articles=${articles.length}`,
+            `budgetChars=${budgetChars}`,
+            `articleBudgetChars=${articleBudgetChars}`,
+          );
+        }
+
         // Build context messages
-        const systemPrompt = activeSkills.length > 0
-          ? buildCompositePrompt({ skills: activeSkills, articles })
-          : settings.ai.systemPrompt || buildDefaultSystemPrompt(articles.length);
+        const systemPrompt = buildSystemPrompt(settings, keptArticles.length);
 
         const contextMessages: ChatMessage[] = [
           { role: "system", content: systemPrompt },
         ];
 
-        // Add page content as context when no skills are active (composite prompt already includes it when skills present)
-        if (activeSkills.length === 0 && articles.length > 0) {
+        // Add the page content as context
+        if (keptArticles.length > 0) {
           let pageContextText: string;
-          if (articles.length === 1) {
-            pageContextText = `Here is the page content for context:\n\n${articles[0].bodyMarkdown}`;
+          if (keptArticles.length === 1) {
+            pageContextText = `${PAGE_CONTEXT_PREFIX}${keptArticles[0].bodyMarkdown}`;
           } else {
-            const combined = articles
+            const combined = keptArticles
               .map((a, i) => `### Page ${i + 1}: ${a.title}\nURL: ${a.sourceUrl}\n\n${a.bodyMarkdown}`)
               .join("\n\n---\n\n");
-            pageContextText = `Here is the page content for context:\n\n${combined}`;
+            pageContextText = `${PAGE_CONTEXT_PREFIX}${combined}`;
           }
           contextMessages.push({ role: "user", content: pageContextText });
-          contextMessages.push({ role: "assistant", content: "I've read the page content. How can I help you?" });
+          contextMessages.push({ role: "assistant", content: PAGE_CONTEXT_ACK });
         }
 
-        // Add conversation history
+        // Conversation history — collected separately (rather than pushed
+        // straight into contextMessages) so it can be trimmed to fit the
+        // configured context window (CF-3.8) without touching the system
+        // prompt, page context, or the new message.
         const state = tabState.get(currentTabId);
+        const historyMessages: ChatMessage[] = [];
         if (state) {
           for (const msg of state.conversation.messages) {
-            contextMessages.push({
+            historyMessages.push({
               role: msg.role === "user" ? "user" : "assistant",
               content: msg.content,
             });
           }
         }
 
-        // Add the new user message — unless this is a retry and the failed
+        // The new user message — unless this is a retry and the failed
         // attempt already recorded it as the last history entry, in which
-        // case the loop above has already included it (CF-3.2)
+        // case historyMessages already includes it (CF-3.2)
         const lastHistory = state?.conversation.messages[state.conversation.messages.length - 1];
         const alreadyInContext = isRetry && lastHistory?.role === "user" && lastHistory.content === text;
-        if (!alreadyInContext) {
-          contextMessages.push({ role: "user", content: text });
+        // On a retry the recorded message IS the new message: pin it (CF-3.8 —
+        // never droppable) instead of leaving it in the trimmable history.
+        if (alreadyInContext) historyMessages.pop();
+        const pinnedAfter: ChatMessage[] = [{ role: "user", content: text }];
+
+        const { messages: budgetedMessages, historyTruncated } = fitConversationToBudget(
+          contextMessages,
+          historyMessages,
+          pinnedAfter,
+          budgetChars,
+        );
+        if (historyTruncated) {
+          logger.debug(
+            "CF-3.8: dropped oldest conversation turns to fit the budget",
+            `kept=${budgetedMessages.length - contextMessages.length - pinnedAfter.length}/${historyMessages.length}`,
+            `budgetChars=${budgetChars}`,
+          );
         }
 
         // Record user message in state (only for new messages, not retries)
@@ -701,11 +739,11 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
 
         abortController = new AbortController();
 
-        send({ type: "streamStart" });
+        send({ type: "streamStart", historyTruncated, contextTruncated });
 
         const result = await client.streamChatCompletion({
           model: settings.ai.modelId,
-          messages: contextMessages,
+          messages: budgetedMessages,
           signal: abortController.signal,
           onToken: (token) => {
             send({ type: "streamToken", token });
@@ -759,6 +797,10 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
           } else {
             incrementFailures();
             const canRetry = getConsecutiveFailures() < MAX_CONSECUTIVE_FAILURES;
+            logger.warn("Q&A stream failed", result.reason, result.detail, `canRetry=${canRetry}`);
+            if (!canRetry) {
+              logger.warn("Retry exhausted after 3 consecutive failures (Q&A)");
+            }
             send({
               type: "streamError",
               reason: result.detail,
@@ -822,116 +864,6 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
       }
 
       // -----------------------------------------------------------------------
-      // loadSkill handler (adds to library + activates)
-      // -----------------------------------------------------------------------
-
-      async function handleLoadSkill(raw: string): Promise<void> {
-        const result = parseSkillFile(raw);
-
-        if (!result.ok) {
-          send({ type: "skillError", errors: result.errors });
-          return;
-        }
-
-        const skill = result.skill;
-
-        // Add to library and activate
-        const stored = await skillLibrary.addSkill(skill);
-        await skillLibrary.activateSkill(stored.id);
-        activeSkills = [skill];
-
-        // Clear conversation for current tab
-        clearConversation();
-
-        // Persist activation greeting as first message in tab state (if non-empty)
-        if (skill.activation && currentTabId !== null) {
-          const state = tabState.get(currentTabId);
-          if (state) {
-            const activationMsg: ConversationMessage = {
-              role: "assistant",
-              content: skill.activation,
-              timestamp: clock(),
-            };
-            tabState.update(currentTabId, {
-              conversation: {
-                ...state.conversation,
-                messages: [activationMsg],
-                updatedAt: clock(),
-              },
-            });
-          }
-        }
-
-        send({
-          type: "skillLoaded",
-          name: skill.name,
-          description: skill.description,
-          activation: skill.activation || null,
-        });
-      }
-
-      // -----------------------------------------------------------------------
-      // Library handlers
-      // -----------------------------------------------------------------------
-
-      async function handleGetLibrary(): Promise<void> {
-        const library = await skillLibrary.getLibrary();
-        const snapshot: SkillLibrarySnapshot = {
-          skills: library.skills.map((s) => ({ id: s.id, name: s.name, description: s.description })),
-          personas: library.personas.map((p) => ({
-            id: p.id,
-            name: p.name,
-            description: p.description,
-            skillNames: p.skillIds.map((sid) => library.skills.find((s) => s.id === sid)?.name ?? "Unknown").filter(Boolean),
-          })),
-          active: library.active,
-        };
-        send({ type: "libraryState", library: snapshot });
-      }
-
-      async function handleActivateSkill(skillId: string): Promise<void> {
-        await handleActivation("skill", skillId);
-      }
-
-      async function handleActivatePersona(personaId: string): Promise<void> {
-        await handleActivation("persona", personaId);
-      }
-
-      async function handleActivation(kind: "skill" | "persona", id: string): Promise<void> {
-        try {
-          if (kind === "skill") {
-            await skillLibrary.activateSkill(id);
-          } else {
-            await skillLibrary.activatePersona(id);
-          }
-          activeSkills = await skillLibrary.getActiveSkills();
-          clearConversation();
-
-          const activation = activeSkills[0]?.activation || null;
-          if (activation && currentTabId !== null) {
-            const state = tabState.get(currentTabId);
-            if (state) {
-              tabState.update(currentTabId, {
-                conversation: { ...state.conversation, messages: [{ role: "assistant", content: activation, timestamp: clock() }], updatedAt: clock() },
-              });
-            }
-          }
-
-          const library = await skillLibrary.getLibrary();
-          send({ type: "activationChanged", active: library.active, names: activeSkills.map((s) => s.name) });
-        } catch {
-          send({ type: "skillError", errors: [`${kind === "skill" ? "Skill" : "Persona"} not found in library`] });
-        }
-      }
-
-      async function handleDeactivate(): Promise<void> {
-        await skillLibrary.deactivate();
-        activeSkills = [];
-        clearConversation();
-        send({ type: "skillCleared" });
-      }
-
-      // -----------------------------------------------------------------------
       // clearConversation helper
       // -----------------------------------------------------------------------
 
@@ -982,6 +914,23 @@ export function createChatController(opts: CreateChatControllerOptions): ChatCon
 // ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
+
+/**
+ * Prompt budget in chars (CF-3.8/CF-3.9). Only the Ollama provider is
+ * budgeted — Ollama silently truncates the front of an oversized prompt (and
+ * is the one we send num_ctx to, CF-5.5). OpenAI-compatible servers report an
+ * overflow explicitly, so they get an unlimited budget: nothing is trimmed,
+ * shortened or flagged.
+ */
+function getBudgetChars(settings: Settings): number {
+  if (settings.ai.provider !== "ollama") return Number.POSITIVE_INFINITY;
+  return computeBudgetChars(settings.ai.contextWindowTokens ?? DEFAULT_CONTEXT_WINDOW_TOKENS);
+}
+
+/** The system prompt the controller sends: the user's custom prompt, else the default. */
+function buildSystemPrompt(settings: Settings, articleCount: number): string {
+  return settings.ai.systemPrompt || buildDefaultSystemPrompt(articleCount);
+}
 
 function buildDefaultSystemPrompt(articleCount: number): string {
   const sourceGuidance = articleCount > 1

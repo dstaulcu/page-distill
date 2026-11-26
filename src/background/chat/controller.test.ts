@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createChatController, type Port, type CreateChatControllerOptions } from "./controller";
-import type { Settings, TabState, Conversation, SkillDefinition, SkillLibrary, StoredSkill } from "@shared/types";
+import type { Settings, TabState, Conversation, AiProvider } from "@shared/types";
+import { inferProvider } from "@shared/providers";
 import type { ExtractionResult } from "@content/extractor/extract";
 import type { TabStateManager } from "@background/tab-state";
-import type { SkillLibraryManager } from "@background/skill-library";
 import type { SecureStore } from "@background/secure-store";
 import type {
   StreamingAiClient,
@@ -17,14 +17,20 @@ import type { ControllerToSidebarMessage } from "@shared/port-protocol";
 // Test helpers
 // ---------------------------------------------------------------------------
 
+/** Budgeting (CF-3.8/3.9) applies only to Ollama-style endpoints. */
+const OLLAMA_URL = "http://localhost:11434";
+
 function createMockSettings(overrides?: Partial<Settings["ai"]>): Settings {
   return {
     schemaVersion: 1,
     ai: {
       baseUrl: "https://api.example.com",
+      // Defaults to what the URL implies (localhost → ollama); tests can override.
+      provider: inferProvider(overrides?.baseUrl ?? "https://api.example.com"),
       modelId: "gpt-4",
       apiKeyRef: "ref-123",
       systemPrompt: "You are a helpful assistant.",
+      contextWindowTokens: 8192,
       ...overrides,
     },
     export: {
@@ -33,7 +39,7 @@ function createMockSettings(overrides?: Partial<Settings["ai"]>): Settings {
       frontmatterFields: ["title"],
     },
     sitePatterns: [],
-    autoExportConfigs: [],
+    debugLogging: false,
   };
 }
 
@@ -60,33 +66,6 @@ function createMockTabState(): TabStateManager {
     }),
     remove: vi.fn((tabId: number) => { store.delete(tabId); }),
     has: vi.fn((tabId: number) => store.has(tabId)),
-  };
-}
-
-function createMockSkillLibrary(): SkillLibraryManager {
-  let library: SkillLibrary = { schemaVersion: 1, skills: [], personas: [], active: { kind: "none" } };
-  return {
-    getLibrary: vi.fn(async () => library),
-    addSkill: vi.fn(async (skill: SkillDefinition) => {
-      const stored: StoredSkill = { ...skill, id: `skill-${Date.now()}`, addedAt: new Date().toISOString() };
-      library = { ...library, skills: [...library.skills, stored] };
-      return stored;
-    }),
-    removeSkill: vi.fn(async () => {}),
-    updateSkill: vi.fn(async () => ({ id: "", addedAt: "" }) as unknown as StoredSkill),
-    addPersona: vi.fn(async () => ({ id: "", name: "", description: "", skillIds: [], createdAt: "", updatedAt: "" })),
-    removePersona: vi.fn(async () => {}),
-    updatePersona: vi.fn(async () => ({ id: "", name: "", description: "", skillIds: [], createdAt: "", updatedAt: "" })),
-    activateSkill: vi.fn(async (id: string) => { library = { ...library, active: { kind: "skill", skillId: id } }; }),
-    activatePersona: vi.fn(async () => {}),
-    deactivate: vi.fn(async () => { library = { ...library, active: { kind: "none" } }; }),
-    getActiveSkills: vi.fn(async () => {
-      if (library.active.kind === "skill") {
-        const skill = library.skills.find((s) => s.id === (library.active as { kind: "skill"; skillId: string }).skillId);
-        return skill ? [skill] : [];
-      }
-      return [];
-    }),
   };
 }
 
@@ -157,7 +136,6 @@ interface TestContext {
   controller: ReturnType<typeof createChatController>;
   port: ReturnType<typeof createMockPort>;
   tabState: TabStateManager;
-  skillLibrary: SkillLibraryManager;
   settings: Settings;
   secureStore: SecureStore;
   extractContent: ReturnType<typeof vi.fn>;
@@ -171,11 +149,11 @@ function setup(overrides?: {
   extractionResult?: ExtractionResult;
   streamResult?: StreamChatCompletionResult;
   onStreamCall?: (req: StreamChatCompletionRequest) => void;
+  logger?: CreateChatControllerOptions["logger"];
 }): TestContext {
   const settings = overrides?.settings ?? createMockSettings();
   const secureStore = createMockSecureStore();
   const tabState = createMockTabState();
-  const skillLibrary = createMockSkillLibrary();
   const extractContent = vi.fn().mockResolvedValue(
     overrides?.extractionResult ?? createSuccessfulExtractionResult(),
   );
@@ -189,8 +167,8 @@ function setup(overrides?: {
     extractContent,
     createStreamingClient: createStreamingClientFn,
     tabState,
-    skillLibrary,
     clock,
+    logger: overrides?.logger,
   };
 
   const controller = createChatController(opts);
@@ -200,7 +178,6 @@ function setup(overrides?: {
     controller,
     port,
     tabState,
-    skillLibrary,
     settings,
     secureStore,
     extractContent,
@@ -513,7 +490,6 @@ describe("CF-2/CF-3 createChatController", () => {
         extractContent,
         createStreamingClient: vi.fn().mockReturnValue(mockClient),
         tabState,
-        skillLibrary: createMockSkillLibrary(),
         clock: () => "2024-01-15T10:00:00.000Z",
       });
 
@@ -576,7 +552,6 @@ describe("CF-2/CF-3 createChatController", () => {
         extractContent: vi.fn().mockResolvedValue(createSuccessfulExtractionResult()),
         createStreamingClient: vi.fn().mockReturnValue(mockClient),
         tabState,
-        skillLibrary: createMockSkillLibrary(),
         clock: () => "2024-01-15T10:00:00.000Z",
       });
 
@@ -645,7 +620,6 @@ describe("CF-2/CF-3 createChatController", () => {
         extractContent: vi.fn().mockResolvedValue(createSuccessfulExtractionResult()),
         createStreamingClient: vi.fn().mockReturnValue(mockClient),
         tabState,
-        skillLibrary: createMockSkillLibrary(),
         clock: () => "2024-01-15T10:00:00.000Z",
       });
 
@@ -786,7 +760,6 @@ describe("CF-2/CF-3 createChatController", () => {
         extractContent: vi.fn().mockResolvedValue(createSuccessfulExtractionResult()),
         createStreamingClient: vi.fn().mockReturnValue(mockClient),
         tabState: createMockTabState(),
-        skillLibrary: createMockSkillLibrary(),
         clock: () => "2024-01-15T10:00:00.000Z",
       });
 
@@ -849,7 +822,6 @@ describe("CF-2/CF-3 createChatController", () => {
         extractContent: vi.fn().mockResolvedValue(createSuccessfulExtractionResult()),
         createStreamingClient: vi.fn().mockReturnValue(mockClient),
         tabState: createMockTabState(),
-        skillLibrary: createMockSkillLibrary(),
         clock: () => "2024-01-15T10:00:00.000Z",
       });
 
@@ -886,7 +858,6 @@ describe("CF-2/CF-3 createChatController", () => {
         extractContent: vi.fn().mockResolvedValue(createSuccessfulExtractionResult()),
         createStreamingClient: csClient,
         tabState: createMockTabState(),
-        skillLibrary: createMockSkillLibrary(),
         clock: () => "2024-01-15T10:00:00.000Z",
       });
 
@@ -964,7 +935,6 @@ describe("CF-3.3 retry accounting — controller is the single source of truth",
       extractContent: vi.fn().mockResolvedValue(createSuccessfulExtractionResult()),
       createStreamingClient: vi.fn().mockReturnValue(mockClient),
       tabState: createMockTabState(),
-      skillLibrary: createMockSkillLibrary(),
     });
     const port = createMockPort();
     controller.handleConnect(port);
@@ -997,7 +967,7 @@ describe("CF-3.3 retry accounting — controller is the single source of truth",
     const listener = port.messageListeners[0];
     listener({ type: "init", tabId: 9, url: "about:blank" });
     await vi.waitFor(() => {
-      expect(port.messages.some((m) => m.type === "personaModeReady")).toBe(true);
+      expect(port.messages.some((m) => m.type === "freeChatReady")).toBe(true);
     });
 
     listener({ type: "retry" });
@@ -1006,6 +976,156 @@ describe("CF-3.3 retry accounting — controller is the single source of truth",
     });
     const err = port.messages.find((m) => m.type === "streamError") as { canRetry: boolean };
     expect(err.canRetry).toBe(false);
+  });
+});
+
+describe("CF-3.8 context-window budget", () => {
+  function setupWithHistory(overrides: { contextWindowTokens: number; oldTurnChars: number }) {
+    const settings = createMockSettings({ baseUrl: OLLAMA_URL, contextWindowTokens: overrides.contextWindowTokens });
+
+    let capturedReq: StreamChatCompletionRequest | null = null;
+    const ctx = setup({
+      settings,
+      onStreamCall: (req) => { capturedReq = req; },
+    });
+
+    ctx.tabState.set(42, {
+      url: "https://example.com",
+      title: "Test",
+      summary: "Summary",
+      conversation: {
+        tabId: 42,
+        url: "https://example.com",
+        title: "Test",
+        messages: [
+          { role: "user", content: "OLD_QUESTION_" + "x".repeat(overrides.oldTurnChars), timestamp: "2024-01-01T00:00:00.000Z" },
+          { role: "assistant", content: "OLD_ANSWER_" + "y".repeat(overrides.oldTurnChars), timestamp: "2024-01-01T00:01:00.000Z" },
+          { role: "user", content: "recent question", timestamp: "2024-01-01T00:02:00.000Z" },
+          { role: "assistant", content: "recent answer", timestamp: "2024-01-01T00:03:00.000Z" },
+        ],
+        createdAt: "2024-01-01T00:00:00.000Z",
+        updatedAt: "2024-01-01T00:03:00.000Z",
+      },
+      extractionConfidence: "high",
+      consecutiveFailures: 0,
+    });
+
+    return { ...ctx, getCapturedReq: () => capturedReq };
+  }
+
+  it("drops the oldest history turns first when they exceed the configured context window, keeping recent turns and the new message", async () => {
+    // budgetChars = floor(700 * 4 * 0.75) = 2100 — comfortably fits the system
+    // prompt, page context, the two short recent turns, and the new message,
+    // but not the two ~60,000-char turns.
+    const { controller, port, getCapturedReq } = setupWithHistory({ contextWindowTokens: 700, oldTurnChars: 60_000 });
+    controller.handleConnect(port);
+    const listener = port.messageListeners[0];
+
+    listener({ type: "init", tabId: 42 });
+    await vi.waitFor(() => {
+      expect(port.messages.some((m) => m.type === "conversationRestored")).toBe(true);
+    });
+
+    listener({ type: "sendMessage", text: "follow-up question" });
+    await vi.waitFor(() => {
+      expect(port.messages.some((m) => m.type === "streamEnd")).toBe(true);
+    });
+
+    const req = getCapturedReq()!;
+    const contents = req.messages.map((m) => m.content);
+    expect(contents.some((c) => c.includes("OLD_QUESTION_"))).toBe(false);
+    expect(contents.some((c) => c.includes("OLD_ANSWER_"))).toBe(false);
+    expect(contents).toContain("recent question");
+    expect(contents).toContain("recent answer");
+    expect(contents).toContain("follow-up question");
+
+    const streamStart = port.messages.find((m) => m.type === "streamStart") as { historyTruncated?: boolean };
+    expect(streamStart.historyTruncated).toBe(true);
+  });
+
+  it("does not truncate and reports historyTruncated: false when history fits the configured window", async () => {
+    const { controller, port, getCapturedReq } = setupWithHistory({ contextWindowTokens: 8192, oldTurnChars: 50 });
+    controller.handleConnect(port);
+    const listener = port.messageListeners[0];
+
+    listener({ type: "init", tabId: 42 });
+    await vi.waitFor(() => {
+      expect(port.messages.some((m) => m.type === "conversationRestored")).toBe(true);
+    });
+
+    listener({ type: "sendMessage", text: "another question" });
+    await vi.waitFor(() => {
+      expect(port.messages.some((m) => m.type === "streamEnd")).toBe(true);
+    });
+
+    const req = getCapturedReq()!;
+    const contents = req.messages.map((m) => m.content);
+    expect(contents.some((c) => c.includes("OLD_QUESTION_"))).toBe(true);
+    expect(contents.some((c) => c.includes("OLD_ANSWER_"))).toBe(true);
+
+    const streamStart = port.messages.find((m) => m.type === "streamStart") as { historyTruncated?: boolean };
+    expect(streamStart.historyTruncated).toBe(false);
+  });
+});
+
+describe("SF-8 logging", () => {
+  function makeSpyLogger() {
+    return { debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
+  }
+
+  it("logs a debug message when history is truncated to fit the context window (CF-3.8)", async () => {
+    const logger = makeSpyLogger();
+    const settings = createMockSettings({ baseUrl: OLLAMA_URL, contextWindowTokens: 700 });
+    const { controller, port } = setup({ settings, logger });
+
+    controller.handleConnect(port);
+    const listener = port.messageListeners[0];
+
+    listener({ type: "init", tabId: 42 });
+    await vi.waitFor(() => {
+      expect(port.messages.some((m) => m.type === "contextLoaded")).toBe(true);
+    });
+
+    // Build up enough conversation history via successive sendMessage calls
+    // that the small configured window forces a truncation on a later turn.
+    for (let i = 0; i < 3; i++) {
+      listener({ type: "sendMessage", text: "x".repeat(2000) });
+      await vi.waitFor(() => {
+        expect(port.messages.some((m) => m.type === "streamEnd")).toBe(true);
+      });
+      port.messages.length = 0;
+    }
+
+    listener({ type: "sendMessage", text: "one more" });
+    await vi.waitFor(() => {
+      expect(port.messages.some((m) => m.type === "streamEnd")).toBe(true);
+    });
+
+    expect(logger.debug).toHaveBeenCalled();
+    const debugArgs = logger.debug.mock.calls.flat();
+    expect(debugArgs.some((a) => typeof a === "string" && a.includes("CF-3.8"))).toBe(true);
+  });
+
+  it("logs a warn when a Q&A stream fails", async () => {
+    const logger = makeSpyLogger();
+    const { controller, port } = setup({
+      logger,
+      streamResult: { ok: false, reason: "network", detail: "Network error", partialContent: "" },
+    });
+
+    controller.handleConnect(port);
+    const listener = port.messageListeners[0];
+
+    listener({ type: "init", tabId: 42 });
+    await vi.waitFor(() => {
+      expect(port.messages.some((m) => m.type === "contextLoaded")).toBe(true);
+    });
+    listener({ type: "summarize" });
+    await vi.waitFor(() => {
+      expect(port.messages.some((m) => m.type === "streamError")).toBe(true);
+    });
+
+    expect(logger.warn).toHaveBeenCalled();
   });
 });
 
@@ -1271,7 +1391,7 @@ describe("SF-1 / CF-3.2 summarize includes every context tab's content", () => {
     expect(combined).toContain("Third Article");
   });
 
-  it("keeps both added tabs available in persona-chat mode after a same-tab reconnect", async () => {
+  it("keeps both added tabs available in free-chat mode after a same-tab reconnect", async () => {
     const articlesByTab: Record<number, { title: string; bodyMarkdown: string; sourceUrl: string }> = {
       43: { title: "Second Article", bodyMarkdown: "Second content.", sourceUrl: "https://example.com/second" },
       44: { title: "Third Article", bodyMarkdown: "Third content.", sourceUrl: "https://example.com/third" },
@@ -1306,7 +1426,7 @@ describe("SF-1 / CF-3.2 summarize includes every context tab's content", () => {
 
     listener({ type: "init", tabId: 9, url: "about:blank" });
     await vi.waitFor(() => {
-      expect(port.messages.some((m) => m.type === "personaModeReady")).toBe(true);
+      expect(port.messages.some((m) => m.type === "freeChatReady")).toBe(true);
     });
 
     listener({ type: "addContextTab", tabId: 43 });
@@ -1323,10 +1443,10 @@ describe("SF-1 / CF-3.2 summarize includes every context tab's content", () => {
       expect(port.messages.some((m) => m.type === "streamEnd")).toBe(true);
     });
 
-    // Same-tab reconnect — no tab switch, just a resync of persona-chat.
+    // Same-tab reconnect — no tab switch, just a resync of free-chat.
     listener({ type: "init", tabId: 9, url: "about:blank" });
     await vi.waitFor(() => {
-      expect(port.messages.filter((m) => m.type === "personaModeReady")).toHaveLength(2);
+      expect(port.messages.filter((m) => m.type === "freeChatReady")).toHaveLength(2);
     });
     // Both previously-added tabs are restored, not just wiped.
     await vi.waitFor(() => {
@@ -1431,7 +1551,6 @@ describe("CF-2.8 model attribution", () => {
       extractContent: vi.fn().mockResolvedValue(createSuccessfulExtractionResult()),
       createStreamingClient: vi.fn().mockReturnValue(mockClient),
       tabState: createMockTabState(),
-      skillLibrary: createMockSkillLibrary(),
     });
     const port = createMockPort();
     controller.handleConnect(port);
@@ -1485,5 +1604,195 @@ describe("SF-1 restored sessions report cached confidence honestly", () => {
       confidence: "high" | "medium" | "low" | null;
     };
     expect(added.confidence).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review fixes — CF-3.8 retry pinning, CF-3.9 overhead accounting
+// ---------------------------------------------------------------------------
+
+describe("CF-3.8 retry never drops the retried message", () => {
+  it("keeps the retried question as the final message even when it doesn't fit alongside the page context", async () => {
+    // budgetChars = floor(700 * 4 * 0.75) = 2100. The page context (~1,000 chars)
+    // leaves ~1,100 chars of room — less than the 1,500-char question. A retried
+    // message that is treated as droppable history would vanish from the prompt.
+    const bigQuestion = "RETRIED_QUESTION_" + "q".repeat(1500);
+    const requests: StreamChatCompletionRequest[] = [];
+    let call = 0;
+    const mockClient: StreamingAiClient = {
+      streamChatCompletion: vi.fn(async (req: StreamChatCompletionRequest): Promise<StreamChatCompletionResult> => {
+        call++;
+        requests.push(req);
+        if (call === 1) return { ok: false, reason: "network", detail: "boom", partialContent: "" };
+        req.onToken("ok");
+        return { ok: true, content: "ok" };
+      }),
+    };
+    const controller = createChatController({
+      getSettings: vi.fn().mockResolvedValue(createMockSettings({ baseUrl: OLLAMA_URL, contextWindowTokens: 700 })),
+      getSecureStore: () => createMockSecureStore(),
+      extractContent: vi.fn().mockResolvedValue({
+        ok: true,
+        article: {
+          title: "T", author: null, publicationDate: null, sourceUrl: "https://example.com/a",
+          siteName: "", bodyMarkdown: "P".repeat(1000), bodyCharacterCount: 1000,
+        },
+        confidence: "high",
+      }),
+      createStreamingClient: vi.fn().mockReturnValue(mockClient),
+      tabState: createMockTabState(),
+      clock: () => "2024-01-15T10:00:00.000Z",
+    });
+    const port = createMockPort();
+    controller.handleConnect(port);
+    const listener = port.messageListeners[0];
+
+    listener({ type: "init", tabId: 42 });
+    await vi.waitFor(() => expect(port.messages.some((m) => m.type === "contextLoaded")).toBe(true));
+    listener({ type: "sendMessage", text: bigQuestion });
+    await vi.waitFor(() => expect(port.messages.some((m) => m.type === "streamError")).toBe(true));
+    port.messages.length = 0;
+    listener({ type: "retry" });
+    await vi.waitFor(() => expect(port.messages.some((m) => m.type === "streamEnd")).toBe(true));
+
+    const retryReq = requests[1];
+    const last = retryReq.messages[retryReq.messages.length - 1];
+    expect(last).toEqual({ role: "user", content: bigQuestion });
+    // ...and it appears exactly once (CF-3.2/3.3)
+    expect(retryReq.messages.filter((m) => m.content === bigQuestion)).toHaveLength(1);
+  });
+});
+
+describe("CF-3.9 context content budget", () => {
+  const articleOf = (title: string, body: string) => ({
+    title, author: null, publicationDate: null,
+    sourceUrl: `https://example.com/${title.toLowerCase()}`, siteName: "",
+    bodyMarkdown: body, bodyCharacterCount: body.length,
+  });
+
+  type Ctx = ReturnType<typeof setup>;
+
+  function build(opts: { baseUrl: string; provider?: AiProvider; contextWindowTokens: number; systemPrompt?: string; bodies: Record<number, string> }) {
+    let captured: StreamChatCompletionRequest | undefined;
+    const ctx = setup({
+      settings: createMockSettings({
+        baseUrl: opts.baseUrl,
+        provider: opts.provider ?? (opts.baseUrl === OLLAMA_URL ? "ollama" : "openai-compatible"),
+        contextWindowTokens: opts.contextWindowTokens,
+        systemPrompt: opts.systemPrompt ?? "S".repeat(100),
+      }),
+      onStreamCall: (req) => { captured = req; },
+    });
+    ctx.extractContent.mockImplementation(async (tabId: number) => ({
+      ok: true, article: articleOf(`Tab${tabId}`, opts.bodies[tabId]), confidence: "high",
+    }));
+    return { ...ctx, getCaptured: () => captured! };
+  }
+
+  async function connect(ctx: Ctx, extraTabs: number[] = []): Promise<(m: unknown) => void> {
+    ctx.controller.handleConnect(ctx.port);
+    const listener = ctx.port.messageListeners[0];
+    listener({ type: "init", tabId: 42 });
+    await vi.waitFor(() => expect(ctx.port.messages.some((m) => m.type === "contextLoaded")).toBe(true));
+    for (let i = 0; i < extraTabs.length; i++) {
+      listener({ type: "addContextTab", tabId: extraTabs[i] });
+      await vi.waitFor(() => expect(ctx.port.messages.filter((m) => m.type === "contextTabAdded")).toHaveLength(i + 1));
+    }
+    return listener;
+  }
+
+  async function finish(ctx: Ctx): Promise<void> {
+    await vi.waitFor(() => expect(ctx.port.messages.some((m) => m.type === "streamEnd")).toBe(true));
+  }
+
+  const totalChars = (req: StreamChatCompletionRequest) => req.messages.reduce((n, m) => n + m.content.length, 0);
+  const startMsg = (ctx: Ctx) =>
+    ctx.port.messages.find((m) => m.type === "streamStart") as { contextTruncated?: boolean; historyTruncated?: boolean };
+
+  it("summarize: sends every tab in full when everything fits", async () => {
+    const ctx = build({ baseUrl: OLLAMA_URL, contextWindowTokens: 8192, bodies: { 42: "PRIMARY_" + "p".repeat(500), 43: "SECOND_" + "s".repeat(500) } });
+    const listener = await connect(ctx, [43]);
+    listener({ type: "summarize" });
+    await finish(ctx);
+
+    const user = ctx.getCaptured().messages.find((m) => m.role === "user")!.content;
+    expect(user).toContain("p".repeat(500));
+    expect(user).toContain("s".repeat(500));
+    expect(startMsg(ctx).contextTruncated).toBe(false);
+  });
+
+  it("summarize: shortens every tab (keeping the start of each) so the prompt fits the window", async () => {
+    // budgetChars = floor(400 * 4 * 0.75) = 1200
+    const ctx = build({ baseUrl: OLLAMA_URL, contextWindowTokens: 400, bodies: { 42: "PRIMARY_" + "p".repeat(3000), 43: "SECOND_" + "s".repeat(3000) } });
+    const listener = await connect(ctx, [43]);
+    listener({ type: "summarize" });
+    await finish(ctx);
+
+    const user = ctx.getCaptured().messages.find((m) => m.role === "user")!.content;
+    expect(user).toContain("PRIMARY_");
+    expect(user).toContain("SECOND_");
+    expect(totalChars(ctx.getCaptured())).toBeLessThanOrEqual(1200);
+    expect(startMsg(ctx).contextTruncated).toBe(true);
+  });
+
+  it("Q&A: shortens tab content so the prompt (system prompt, page-context wrapper, bodies, question) fits the window", async () => {
+    const ctx = build({ baseUrl: OLLAMA_URL, contextWindowTokens: 400, bodies: { 42: "PRIMARY_" + "p".repeat(3000), 43: "SECOND_" + "s".repeat(3000) } });
+    const listener = await connect(ctx, [43]);
+    listener({ type: "sendMessage", text: "question?" });
+    await finish(ctx);
+
+    const all = ctx.getCaptured().messages.map((m) => m.content).join("\n");
+    expect(all).toContain("PRIMARY_");
+    expect(all).toContain("SECOND_");
+    expect(totalChars(ctx.getCaptured())).toBeLessThanOrEqual(1200);
+    expect(startMsg(ctx).contextTruncated).toBe(true);
+  });
+
+  it("never budgets a non-Ollama endpoint: huge pages, tabs and history go through untouched, with no truncation flags", async () => {
+    const ctx = build({
+      baseUrl: "https://api.example.com", contextWindowTokens: 512,
+      bodies: { 42: "PRIMARY_" + "p".repeat(20_000), 43: "SECOND_" + "s".repeat(20_000) },
+    });
+    const listener = await connect(ctx, [43]);
+    listener({ type: "sendMessage", text: "question?" });
+    await finish(ctx);
+
+    const all = ctx.getCaptured().messages.map((m) => m.content).join("\n");
+    expect(all).toContain("p".repeat(20_000));
+    expect(all).toContain("s".repeat(20_000));
+    expect(startMsg(ctx).contextTruncated).toBeFalsy();
+    expect(startMsg(ctx).historyTruncated).toBeFalsy();
+  });
+
+  it("never trims conversation history on a non-Ollama endpoint", async () => {
+    let captured: StreamChatCompletionRequest | undefined;
+    const ctx = setup({
+      settings: createMockSettings({ baseUrl: "https://api.example.com", contextWindowTokens: 512 }),
+      onStreamCall: (req) => { captured = req; },
+    });
+    ctx.tabState.set(42, {
+      url: "https://example.com", title: "Test", summary: "Summary",
+      conversation: {
+        tabId: 42, url: "https://example.com", title: "Test",
+        messages: [
+          { role: "user", content: "OLD_QUESTION_" + "x".repeat(50_000), timestamp: "2024-01-01T00:00:00.000Z" },
+          { role: "assistant", content: "OLD_ANSWER_" + "y".repeat(50_000), timestamp: "2024-01-01T00:01:00.000Z" },
+        ],
+        createdAt: "2024-01-01T00:00:00.000Z", updatedAt: "2024-01-01T00:01:00.000Z",
+      },
+      extractionConfidence: "high", consecutiveFailures: 0,
+    });
+    ctx.controller.handleConnect(ctx.port);
+    const listener = ctx.port.messageListeners[0];
+    listener({ type: "init", tabId: 42 });
+    await vi.waitFor(() => expect(ctx.port.messages.some((m) => m.type === "conversationRestored")).toBe(true));
+    listener({ type: "sendMessage", text: "next?" });
+    await finish(ctx);
+
+    const contents = captured!.messages.map((m) => m.content);
+    expect(contents.some((c) => c.startsWith("OLD_QUESTION_"))).toBe(true);
+    expect(contents.some((c) => c.startsWith("OLD_ANSWER_"))).toBe(true);
+    const start = ctx.port.messages.find((m) => m.type === "streamStart") as { historyTruncated?: boolean };
+    expect(start.historyTruncated).toBeFalsy();
   });
 });

@@ -28,6 +28,7 @@ let localStorageData: Record<string, unknown>;
 let syncStorageData: Record<string, unknown>;
 let runtimeSendResponse: unknown;
 let tabActivatedListeners: Array<(info: { tabId: number; windowId: number }) => void>;
+let runtimeMessageListeners: Array<(msg: unknown) => void>;
 let tabUrlById: Record<number, string>;
 
 async function activateTab(tabId: number): Promise<void> {
@@ -40,6 +41,7 @@ function installBrowserMock(): void {
   sentRuntimeMessages = [];
   runtimeSendResponse = { payload: { ok: true, filename: "x.md" } };
   tabActivatedListeners = [];
+  runtimeMessageListeners = [];
   tabUrlById = {
     42: "https://example.com/article",
     43: "https://example.com/other",
@@ -70,6 +72,10 @@ function installBrowserMock(): void {
           sentRuntimeMessages.push(msg);
           return runtimeSendResponse;
         }),
+        onMessage: {
+          addListener: vi.fn((cb: (msg: unknown) => void) => { runtimeMessageListeners.push(cb); }),
+          removeListener: vi.fn(),
+        },
         openOptionsPage: vi.fn(),
         getManifest: vi.fn(() => ({ version: "4.0.0" })),
       },
@@ -160,6 +166,13 @@ describe("sidebar init", () => {
       expect.objectContaining({ type: "init", tabId: 42 }),
     );
   });
+
+  it("renders no in-page title (Firefox's sidebar title bar already names the extension)", async () => {
+    await loadSidebar();
+
+    expect(app().querySelector(".sidebar-header h1")).toBeNull();
+    expect(app().querySelector(".sidebar-header .btn-help")).not.toBeNull();
+  });
 });
 
 describe("SF-7 Help menu", () => {
@@ -205,8 +218,8 @@ describe("SF-7 Help menu", () => {
     const links = app().querySelectorAll<HTMLAnchorElement>(".help-menu-external");
     expect(links.length).toBe(2);
     expect(Array.from(links).map((a) => a.href)).toEqual([
-      "https://github.com/dstaulcu/distill/issues",
-      "https://github.com/dstaulcu/distill/releases",
+      "https://github.com/dstaulcu/page-distill/issues",
+      "https://github.com/dstaulcu/page-distill/releases",
     ]);
     for (const link of links) {
       expect(link.target).toBe("_blank");
@@ -326,7 +339,7 @@ describe("CF-2.8 model attribution", () => {
   });
 });
 
-describe("SF-2 persona-chat summarize", () => {
+describe("SF-2 free-chat summarize", () => {
   const otherTabAdded: ControllerToSidebarMessage = {
     type: "contextTabAdded",
     tabId: 99,
@@ -337,7 +350,7 @@ describe("SF-2 persona-chat summarize", () => {
 
   it("offers a Summarize action once a context tab is added, before any messages exist", async () => {
     await loadSidebar();
-    emit({ type: "personaModeReady", messages: [] });
+    emit({ type: "freeChatReady", messages: [] });
 
     // No context yet — no way to summarize nothing.
     expect(app().querySelector(".btn-summarize")).toBeNull();
@@ -347,9 +360,9 @@ describe("SF-2 persona-chat summarize", () => {
     expect(app().querySelector(".btn-summarize")).not.toBeNull();
   });
 
-  it("summarizing from persona-chat sends summarize and returns to persona-chat (not ready) after the stream ends", async () => {
+  it("summarizing from free-chat sends summarize and returns to free-chat (not ready) after the stream ends", async () => {
     await loadSidebar();
-    emit({ type: "personaModeReady", messages: [] });
+    emit({ type: "freeChatReady", messages: [] });
     emit(otherTabAdded);
 
     (app().querySelector(".btn-summarize") as HTMLButtonElement).click();
@@ -362,15 +375,40 @@ describe("SF-2 persona-chat summarize", () => {
     emit({ type: "streamEnd", fullContent: "Findings: it's a good article." });
 
     expect(app().textContent).toContain("Findings");
-    // Persona-chat's Reset/New Chat header buttons don't show for "ready" —
-    // staying out of "ready" proves the round-trip preserved persona-chat's
+    // Free-chat's Reset/New Chat header buttons don't show for "ready" —
+    // staying out of "ready" proves the round-trip preserved free-chat's
     // multi-tab context semantics instead of collapsing to single-tab "ready".
     expect(app().querySelector(".btn-reset")).toBeNull();
   });
 
+  it("lets the user update the summary after adding a tab, appending it to the chat", async () => {
+    await loadSidebar();
+    emit({ type: "freeChatReady", messages: [] });
+    emit(otherTabAdded);
+    (app().querySelector(".btn-summarize") as HTMLButtonElement).click();
+    emit({ type: "streamStart" });
+    emit({ type: "streamEnd", fullContent: "First summary." });
+
+    // A summary exists now; the one-shot Summarize action is gone but an update is offered.
+    expect(app().querySelector(".btn-summarize")).toBeNull();
+    emit({ ...otherTabAdded, tabId: 100, title: "Third Article" });
+    const update = app().querySelector(".btn-resummarize") as HTMLButtonElement;
+    expect(update).not.toBeNull();
+
+    mockPort.postMessage.mockClear();
+    update.click();
+    expect(mockPort.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "summarize" }));
+
+    emit({ type: "streamStart" });
+    emit({ type: "streamEnd", fullContent: "Updated summary." });
+
+    expect(app().textContent).toContain("First summary.");
+    expect(app().textContent).toContain("Updated summary.");
+  });
+
   it("keeps a previously added context tab when a resync happens mid-add (background idle-unload)", async () => {
     await loadSidebar();
-    emit({ type: "personaModeReady", messages: [] });
+    emit({ type: "freeChatReady", messages: [] });
     emit(otherTabAdded);
 
     expect(app().querySelector(".btn-summarize")).not.toBeNull();
@@ -383,10 +421,10 @@ describe("SF-2 persona-chat summarize", () => {
     // reconnects and replays init before the real request.
     (app().querySelector(".context-chip-add") as HTMLButtonElement).click();
 
-    // The controller's reply to the replayed init — a fresh persona-chat
+    // The controller's reply to the replayed init — a fresh free-chat
     // start, since nothing has been cached yet — must not wipe the tab
-    // already added or drop back out of persona-chat.
-    emit({ type: "personaModeReady", messages: [] });
+    // already added or drop back out of free-chat.
+    emit({ type: "freeChatReady", messages: [] });
 
     expect(app().querySelectorAll(".context-chip-remove")).toHaveLength(1);
     expect(app().querySelector(".btn-summarize")).not.toBeNull();
@@ -449,6 +487,180 @@ describe("CF-3.3 stream errors and retry", () => {
     emit({ type: "streamError", reason: "Connection failed", partialContent: "", canRetry: false });
 
     expect(app().querySelector(".btn-retry")).toBeNull();
+  });
+});
+
+describe("CF-3.8 context-window truncation notice", () => {
+  async function reachStreamingWithHistory(): Promise<void> {
+    await loadSidebar();
+    emit(contextLoaded);
+    emit({ type: "conversationRestored", messages: [{ role: "assistant", content: "The summary", timestamp: "t" }] });
+    const textarea = app().querySelector(".message-input") as HTMLTextAreaElement;
+    textarea.value = "What about X?";
+    (app().querySelector(".btn-send") as HTMLButtonElement).click();
+  }
+
+  it("shows a truncation note when the controller reports historyTruncated: true, without dropping the visible conversation", async () => {
+    await reachStreamingWithHistory();
+    emit({ type: "streamStart", historyTruncated: true });
+
+    expect(app().querySelector(".truncation-notice")).not.toBeNull();
+    expect(app().textContent).toContain("The summary");
+    expect(app().textContent).toContain("What about X?");
+  });
+
+  it("shows no truncation note when historyTruncated is false", async () => {
+    await reachStreamingWithHistory();
+    emit({ type: "streamStart", historyTruncated: false });
+
+    expect(app().querySelector(".truncation-notice")).toBeNull();
+  });
+
+  it("shows no truncation note when historyTruncated is omitted (e.g. summarize, which has no history to trim)", async () => {
+    await loadSidebar();
+    emit({ type: "freeChatReady", messages: [] });
+    emit({
+      type: "contextTabAdded",
+      tabId: 99,
+      url: "https://example.com/other",
+      title: "Other Article",
+      confidence: "high",
+    });
+    (app().querySelector(".btn-summarize") as HTMLButtonElement).click();
+    emit({ type: "streamStart" });
+
+    expect(app().querySelector(".truncation-notice")).toBeNull();
+  });
+});
+
+describe("CF-3.9 context truncation notice", () => {
+  it("shows the notice during summarize when the controller reports contextTruncated: true", async () => {
+    await loadSidebar();
+    emit({ type: "freeChatReady", messages: [] });
+    emit({
+      type: "contextTabAdded",
+      tabId: 99,
+      url: "https://example.com/other",
+      title: "Other Article",
+      confidence: "high",
+    });
+    (app().querySelector(".btn-summarize") as HTMLButtonElement).click();
+    emit({ type: "streamStart", contextTruncated: true });
+
+    expect(app().querySelector(".truncation-notice")).not.toBeNull();
+    expect(app().textContent).toContain("shortened");
+  });
+
+  it("shows no notice during summarize when contextTruncated is false", async () => {
+    await loadSidebar();
+    emit({ type: "freeChatReady", messages: [] });
+    emit({
+      type: "contextTabAdded",
+      tabId: 99,
+      url: "https://example.com/other",
+      title: "Other Article",
+      confidence: "high",
+    });
+    (app().querySelector(".btn-summarize") as HTMLButtonElement).click();
+    emit({ type: "streamStart", contextTruncated: false });
+
+    expect(app().querySelector(".truncation-notice")).toBeNull();
+  });
+
+  it("shows the notice on a Q&A follow-up when the controller reports contextTruncated: true", async () => {
+    await loadSidebar();
+    emit(contextLoaded);
+    emit({ type: "conversationRestored", messages: [{ role: "assistant", content: "The summary", timestamp: "t" }] });
+    const textarea = app().querySelector(".message-input") as HTMLTextAreaElement;
+    textarea.value = "What about X?";
+    (app().querySelector(".btn-send") as HTMLButtonElement).click();
+    emit({ type: "streamStart", historyTruncated: false, contextTruncated: true });
+
+    const notices = app().querySelectorAll(".truncation-notice");
+    expect(notices).toHaveLength(1);
+    expect(notices[0].textContent).toContain("shortened");
+  });
+
+  it("shows both notices when a request has both history and context tabs truncated", async () => {
+    await loadSidebar();
+    emit(contextLoaded);
+    emit({ type: "conversationRestored", messages: [{ role: "assistant", content: "The summary", timestamp: "t" }] });
+    const textarea = app().querySelector(".message-input") as HTMLTextAreaElement;
+    textarea.value = "What about X?";
+    (app().querySelector(".btn-send") as HTMLButtonElement).click();
+    emit({ type: "streamStart", historyTruncated: true, contextTruncated: true });
+
+    expect(app().querySelectorAll(".truncation-notice")).toHaveLength(2);
+  });
+});
+
+describe("CF-3.8/CF-3.9 truncation notices persist after the reply completes", () => {
+  async function reachReadyWithHistory(): Promise<void> {
+    await loadSidebar();
+    emit(contextLoaded);
+    emit({ type: "conversationRestored", messages: [{ role: "assistant", content: "The summary", timestamp: "t" }] });
+  }
+
+  function send(text: string): void {
+    const textarea = app().querySelector(".message-input") as HTMLTextAreaElement;
+    textarea.value = text;
+    (app().querySelector(".btn-send") as HTMLButtonElement).click();
+  }
+
+  it("keeps the history-trimmed note visible once the answer has finished streaming", async () => {
+    await reachReadyWithHistory();
+    send("What about X?");
+    emit({ type: "streamStart", historyTruncated: true });
+    emit({ type: "streamToken", token: "Answer" });
+    emit({ type: "streamEnd", fullContent: "Answer" });
+
+    expect(app().textContent).toContain("Answer");
+    expect(app().querySelector(".btn-send")).not.toBeNull(); // back in the ready phase
+    expect(app().querySelectorAll(".truncation-notice")).toHaveLength(1);
+    expect(app().textContent).toContain("trimmed");
+  });
+
+  it("keeps the dropped-tabs note visible after a Q&A reply completes, alongside the history note when both apply", async () => {
+    await reachReadyWithHistory();
+    send("What about X?");
+    emit({ type: "streamStart", historyTruncated: true, contextTruncated: true });
+    emit({ type: "streamEnd", fullContent: "Answer" });
+
+    expect(app().querySelectorAll(".truncation-notice")).toHaveLength(2);
+    expect(app().textContent).toContain("shortened");
+  });
+
+  it("keeps the dropped-tabs note visible after a summarize completes", async () => {
+    await loadSidebar();
+    emit({ type: "freeChatReady", messages: [] });
+    emit({ type: "contextTabAdded", tabId: 99, url: "https://example.com/other", title: "Other Article", confidence: "high" });
+    (app().querySelector(".btn-summarize") as HTMLButtonElement).click();
+    emit({ type: "streamStart", contextTruncated: true });
+    emit({ type: "streamEnd", fullContent: "The summary" });
+
+    expect(app().textContent).toContain("The summary");
+    expect(app().textContent).toContain("shortened");
+  });
+
+  it("clears the note when the next request starts without truncation", async () => {
+    await reachReadyWithHistory();
+    send("first");
+    emit({ type: "streamStart", historyTruncated: true });
+    emit({ type: "streamEnd", fullContent: "A1" });
+    expect(app().querySelector(".truncation-notice")).not.toBeNull();
+
+    send("second");
+    emit({ type: "streamStart", historyTruncated: false });
+    emit({ type: "streamEnd", fullContent: "A2" });
+    expect(app().querySelector(".truncation-notice")).toBeNull();
+  });
+
+  it("shows no note after a plain reply that was never truncated", async () => {
+    await reachReadyWithHistory();
+    send("hello");
+    emit({ type: "streamStart", historyTruncated: false });
+    emit({ type: "streamEnd", fullContent: "Hi" });
+    expect(app().querySelector(".truncation-notice")).toBeNull();
   });
 });
 
@@ -645,10 +857,10 @@ describe("SF-1 switching to a tab already in context does not reset the session"
     // Switch the browser's active tab to tab 43 — already a context chip.
     await activateTab(43);
 
-    // Auto-export status still refreshes for the tab now in view, but the
-    // chat session itself does not reset — no "init" is sent for the switch.
+    // The chat session does not reset — nothing at all is sent for the switch
+    // (in particular no "init").
     const newCalls = mockPort.postMessage.mock.calls.slice(callsBefore).map(([m]) => m as { type: string; tabId?: number });
-    expect(newCalls).toEqual([{ type: "autoExportStatusRequest", tabId: 43 }]);
+    expect(newCalls).toEqual([]);
 
     // Conversation and both chips are still intact.
     expect(app().textContent).toContain("The summary");
@@ -693,5 +905,158 @@ describe("SF-1 switching to a tab already in context does not reset the session"
 
     const newCalls = mockPort.postMessage.mock.calls.slice(callsBefore);
     expect(newCalls.some(([m]) => (m as { type: string }).type === "init" && (m as { tabId: number }).tabId === 44)).toBe(true);
+  });
+});
+
+describe("SF-8 logging", () => {
+  it("produces no console output by default (debugLogging starts false)", async () => {
+    const debugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+    try {
+      await loadSidebar();
+      emit(contextLoaded);
+      emit({ type: "conversationRestored", messages: [{ role: "assistant", content: "S", timestamp: "t" }] });
+      expect(debugSpy).not.toHaveBeenCalled();
+    } finally {
+      debugSpy.mockRestore();
+    }
+  });
+
+  it("logs stream lifecycle events once debugLogging is enabled in settings", async () => {
+    syncStorageData.settings = { debugLogging: true };
+    const debugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+    try {
+      await loadSidebar();
+      emit(contextLoaded);
+      emit({ type: "conversationRestored", messages: [{ role: "assistant", content: "S", timestamp: "t" }] });
+      const textarea = app().querySelector(".message-input") as HTMLTextAreaElement;
+      textarea.value = "What about X?";
+      (app().querySelector(".btn-send") as HTMLButtonElement).click();
+      emit({ type: "streamStart" });
+      emit({ type: "streamEnd", fullContent: "An answer." });
+
+      expect(debugSpy).toHaveBeenCalled();
+    } finally {
+      debugSpy.mockRestore();
+    }
+  });
+
+  it("logs a warn on a stream error once debugLogging is enabled", async () => {
+    syncStorageData.settings = { debugLogging: true };
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await loadSidebar();
+      emit(contextLoaded);
+      emit({ type: "conversationRestored", messages: [{ role: "assistant", content: "S", timestamp: "t" }] });
+      const textarea = app().querySelector(".message-input") as HTMLTextAreaElement;
+      textarea.value = "What about X?";
+      (app().querySelector(".btn-send") as HTMLButtonElement).click();
+      emit({ type: "streamError", reason: "Connection failed", partialContent: "", canRetry: true });
+
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});
+
+describe("SF-8 sidebar picks up debug-logging changes live", () => {
+  it("starts logging as soon as a settingsChanged broadcast enables debugLogging, without reopening", async () => {
+    const debugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+    try {
+      await loadSidebar();
+      emit({ type: "streamStart" });
+      expect(debugSpy).not.toHaveBeenCalled();
+
+      expect(runtimeMessageListeners.length).toBeGreaterThan(0);
+      const settings = {
+        schemaVersion: 1, ai: { baseUrl: "", modelId: "", apiKeyRef: null, systemPrompt: "", contextWindowTokens: 8192 },
+        export: { filenamePattern: "", defaultDestination: { kind: "download" }, frontmatterFields: [] },
+        sitePatterns: [], debugLogging: true,
+      };
+      for (const cb of runtimeMessageListeners) cb({ kind: "settingsChanged", payload: settings });
+
+      emit({ type: "streamStart" });
+      expect(debugSpy).toHaveBeenCalled();
+    } finally {
+      debugSpy.mockRestore();
+    }
+  });
+});
+
+describe("removed features: auto-export, personas, bot avatar, skills", () => {
+  it("shows no auto-export toggle, avatar controls, or skill picker / Add Skill / Clear controls", async () => {
+    await loadSidebar();
+    emit(contextLoaded);
+    emit({ type: "conversationRestored", messages: [{ role: "assistant", content: "The summary", timestamp: "t" }] });
+
+    expect(app().querySelector(".auto-export-toggle")).toBeNull();
+    expect(app().textContent).not.toMatch(/auto-export/i);
+    expect(app().querySelector(".bot-avatar")).toBeNull();
+    expect(app().querySelector(".btn-choose-avatar")).toBeNull();
+    expect(app().querySelector(".skill-section")).toBeNull();
+    expect(app().querySelector(".skill-picker")).toBeNull();
+    expect(app().querySelector(".btn-clear-skill")).toBeNull();
+    expect(app().querySelector("input[type='file']")).toBeNull();
+    expect(app().textContent).not.toMatch(/skill|persona|avatar/i);
+  });
+
+  it("does not ask the controller for a skill library", async () => {
+    await loadSidebar();
+    const sent = mockPort.postMessage.mock.calls.map(([m]) => (m as { type: string }).type);
+    expect(sent).not.toContain("getLibrary");
+  });
+});
+
+describe("CF-4 export checkboxes: Summary, Content, Q&A", () => {
+  async function reachReady(): Promise<void> {
+    await loadSidebar();
+    emit(contextLoaded);
+    emit({ type: "conversationRestored", messages: [{ role: "assistant", content: "The summary", timestamp: "t" }] });
+  }
+
+  const boxes = () => Array.from(app().querySelectorAll<HTMLInputElement>(".export-checkbox"));
+  const labels = () => Array.from(app().querySelectorAll(".export-checkbox-label")).map((l) => l.textContent!.trim());
+  const exportBtn = () => app().querySelector(".btn-export") as HTMLButtonElement;
+  const exportPayload = () =>
+    (sentRuntimeMessages.find((m) => (m as { kind?: string }).kind === "exportRequested") as {
+      payload: { includeSummary: boolean; includeContent: boolean; includeQA: boolean };
+    }).payload;
+
+  it("offers three checkboxes in the order Summary, Content, Q&A — only Summary checked by default", async () => {
+    await reachReady();
+    expect(labels()).toEqual(["Summary", "Content", "Q&A"]);
+    expect(boxes().map((b) => b.checked)).toEqual([true, false, false]);
+  });
+
+  it("the default export asks for the summary only", async () => {
+    await reachReady();
+    exportBtn().click();
+    await flush();
+    expect(exportPayload()).toMatchObject({ includeSummary: true, includeContent: false, includeQA: false });
+  });
+
+  it("each checkbox maps to its own flag", async () => {
+    await reachReady();
+    boxes()[0].click(); // summary off
+    boxes()[1].click(); // content on
+    boxes()[2].click(); // Q&A on
+    exportBtn().click();
+    await flush();
+    expect(exportPayload()).toMatchObject({ includeSummary: false, includeContent: true, includeQA: true });
+  });
+
+  it("disables Export while nothing is checked, and re-enables it when something is", async () => {
+    await reachReady();
+    boxes()[0].click(); // uncheck the only checked box
+    expect(exportBtn().disabled).toBe(true);
+    boxes()[1].click();
+    expect(exportBtn().disabled).toBe(false);
+  });
+
+  it("keeps the choices when the sidebar re-renders", async () => {
+    await reachReady();
+    boxes()[1].click(); // content on
+    emit({ type: "contextTabAdded", tabId: 99, url: "https://example.com/o", title: "Other", confidence: "high" }); // re-render
+    expect(boxes().map((b) => b.checked)).toEqual([true, true, false]);
   });
 });

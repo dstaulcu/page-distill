@@ -30,14 +30,22 @@ export interface Settings {
   readonly ai: AiConfig;
   readonly export: ExportConfig;
   readonly sitePatterns: ReadonlyArray<SitePattern>;
-  readonly autoExportConfigs: ReadonlyArray<AutoExportConfig>;
+  /** Gates [Distill]-prefixed console output in every context (SF-8); default false. */
+  readonly debugLogging: boolean;
 }
 
+/** What kind of server the base URL points at (CF-5.7) — see @shared/providers. */
+export type AiProvider = "ollama" | "openai-compatible";
+
 export interface AiConfig {
+  /** Server kind; decides Ollama-only behavior (num_ctx, prompt budgeting) instead of guessing from the URL. */
+  readonly provider: AiProvider;
   readonly baseUrl: string;
   readonly modelId: string;
   readonly apiKeyRef: string | null;
   readonly systemPrompt: string;
+  /** Model's context-window size in tokens; drives CF-3.8 prompt budgeting and CF-5.5 num_ctx. */
+  readonly contextWindowTokens: number;
 }
 
 export interface ExportConfig {
@@ -57,23 +65,6 @@ export interface SitePattern {
 export type ExportDestination =
   | { readonly kind: "download" }
   | { readonly kind: "clipboard" };
-
-// ---------------------------------------------------------------------------
-// Auto Export
-// ---------------------------------------------------------------------------
-
-export interface AutoExportConfig {
-  readonly origin: string;
-  readonly enabled: boolean;
-  readonly intervalMinutes: number;
-  readonly destination: ExportDestination;
-  readonly mode: AutoExportMode;
-  readonly skipIfUnchanged: boolean;
-  readonly createdAt: string;
-  readonly updatedAt: string;
-}
-
-export type AutoExportMode = "content-only" | "full";
 
 // ---------------------------------------------------------------------------
 // Conversation
@@ -148,53 +139,4 @@ export interface TabState {
   // Secondary context tabs (SF-1) added via "+" during this session — the
   // primary tab itself is this TabState entry, not part of this list.
   readonly contextTabs?: ReadonlyArray<ContextTabSnapshot>;
-}
-
-// ---------------------------------------------------------------------------
-// Skill Definitions
-// ---------------------------------------------------------------------------
-
-export interface SkillDefinition {
-  readonly name: string;
-  readonly description: string;
-  readonly personality: string;
-  readonly knowledge: string;
-  readonly commands: string;
-  readonly activation: string;
-  readonly extras: Readonly<Record<string, string>>;
-  readonly systemPrompt: string; // derived, excludes activation
-}
-
-export type SkillParseResult =
-  | { readonly ok: true; readonly skill: SkillDefinition }
-  | { readonly ok: false; readonly errors: readonly string[] };
-
-// ---------------------------------------------------------------------------
-// Skill Library & Personas
-// ---------------------------------------------------------------------------
-
-export interface StoredSkill extends SkillDefinition {
-  readonly id: string;
-  readonly addedAt: string;
-}
-
-export interface Persona {
-  readonly id: string;
-  readonly name: string;
-  readonly description: string;
-  readonly skillIds: readonly string[];
-  readonly createdAt: string;
-  readonly updatedAt: string;
-}
-
-export type ActiveSelection =
-  | { readonly kind: "none" }
-  | { readonly kind: "skill"; readonly skillId: string }
-  | { readonly kind: "persona"; readonly personaId: string };
-
-export interface SkillLibrary {
-  readonly schemaVersion: 1;
-  readonly skills: readonly StoredSkill[];
-  readonly personas: readonly Persona[];
-  readonly active: ActiveSelection;
 }

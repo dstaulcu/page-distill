@@ -14,10 +14,10 @@ import { buildMessage, type MessageOf } from "@shared/messages";
 function makeSettings(sitePatterns: ReadonlyArray<SitePattern> = []): Settings {
   return {
     schemaVersion: 1,
-    ai: { baseUrl: "", modelId: "", apiKeyRef: null, systemPrompt: "" },
+    ai: { provider: "openai-compatible", baseUrl: "", modelId: "", apiKeyRef: null, systemPrompt: "", contextWindowTokens: 8192 },
     export: { filenamePattern: "YYYY-MM-DD-slugified-title", defaultDestination: { kind: "download" }, frontmatterFields: ["title"] },
     sitePatterns,
-    autoExportConfigs: [],
+    debugLogging: false,
   };
 }
 
@@ -248,5 +248,43 @@ describe("extraction result handling", () => {
       expect(result.article.title).toBe("Test Article");
       expect(result.confidence).toBe("high");
     }
+  });
+});
+
+describe("SF-8 logging", () => {
+  function makeSpyLogger() {
+    return { debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
+  }
+
+  it("logs a debug message on a successful extraction", async () => {
+    const logger = makeSpyLogger();
+    const deps = makeDeps({ logger });
+    const service = createExtractionService(deps);
+
+    const result = await service.extractContent(42);
+
+    expect(result.ok).toBe(true);
+    expect(logger.debug).toHaveBeenCalled();
+  });
+
+  it("logs a warn when extraction fails", async () => {
+    const logger = makeSpyLogger();
+    const deps = makeDeps({
+      logger,
+      sendExtractMessage: async () => buildMessage("extractResult", { ok: false, reason: "no-content-detected", detail: "nothing found" }),
+    });
+    const service = createExtractionService(deps);
+
+    const result = await service.extractContent(42);
+
+    expect(result.ok).toBe(false);
+    expect(logger.warn).toHaveBeenCalled();
+  });
+
+  it("does not log anything when no logger is provided (default is safe)", async () => {
+    const deps = makeDeps();
+    const service = createExtractionService(deps);
+
+    await expect(service.extractContent(42)).resolves.toEqual(expect.objectContaining({ ok: true }));
   });
 });

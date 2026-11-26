@@ -1,10 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
 import fc from "fast-check";
 import { createChatController, type Port, type CreateChatControllerOptions } from "./controller";
-import type { Settings, TabState, Conversation, ConversationMessage, SkillDefinition, SkillLibrary, StoredSkill } from "@shared/types";
+import type { Settings, TabState, Conversation, ConversationMessage } from "@shared/types";
 import type { ExtractionResult } from "@content/extractor/extract";
 import type { TabStateManager } from "@background/tab-state";
-import type { SkillLibraryManager } from "@background/skill-library";
 import type { SecureStore } from "@background/secure-store";
 import type {
   StreamingAiClient,
@@ -22,10 +21,12 @@ function createMockSettings(systemPrompt: string = "You are a helpful assistant.
   return {
     schemaVersion: 1,
     ai: {
+      provider: "openai-compatible",
       baseUrl: "https://api.example.com",
       modelId: "gpt-4",
       apiKeyRef: "ref-123",
       systemPrompt,
+      contextWindowTokens: 8192,
     },
     export: {
       filenamePattern: "YYYY-MM-DD-slugified-title",
@@ -33,7 +34,7 @@ function createMockSettings(systemPrompt: string = "You are a helpful assistant.
       frontmatterFields: ["title"],
     },
     sitePatterns: [],
-    autoExportConfigs: [],
+    debugLogging: false,
   };
 }
 
@@ -85,33 +86,6 @@ function createMockPort(): Port & {
       addListener: vi.fn((cb: () => void) => { disconnectListeners.push(cb); }),
       removeListener: vi.fn(),
     },
-  };
-}
-
-function createMockSkillLibrary(): SkillLibraryManager {
-  let library: SkillLibrary = { schemaVersion: 1, skills: [], personas: [], active: { kind: "none" } };
-  return {
-    getLibrary: vi.fn(async () => library),
-    addSkill: vi.fn(async (skill: SkillDefinition) => {
-      const stored: StoredSkill = { ...skill, id: `skill-${Date.now()}`, addedAt: new Date().toISOString() };
-      library = { ...library, skills: [...library.skills, stored] };
-      return stored;
-    }),
-    removeSkill: vi.fn(async () => {}),
-    updateSkill: vi.fn(async () => ({ id: "", addedAt: "" }) as unknown as StoredSkill),
-    addPersona: vi.fn(async () => ({ id: "", name: "", description: "", skillIds: [], createdAt: "", updatedAt: "" })),
-    removePersona: vi.fn(async () => {}),
-    updatePersona: vi.fn(async () => ({ id: "", name: "", description: "", skillIds: [], createdAt: "", updatedAt: "" })),
-    activateSkill: vi.fn(async (id: string) => { library = { ...library, active: { kind: "skill", skillId: id } }; }),
-    activatePersona: vi.fn(async () => {}),
-    deactivate: vi.fn(async () => { library = { ...library, active: { kind: "none" } }; }),
-    getActiveSkills: vi.fn(async () => {
-      if (library.active.kind === "skill") {
-        const skill = library.skills.find((s) => s.id === (library.active as { kind: "skill"; skillId: string }).skillId);
-        return skill ? [skill] : [];
-      }
-      return [];
-    }),
   };
 }
 
@@ -206,7 +180,6 @@ describe("Property 2: Conversation context includes page content and history", (
             } as ExtractionResult),
             createStreamingClient: vi.fn().mockReturnValue(mockClient),
             tabState,
-            skillLibrary: createMockSkillLibrary(),
             clock: () => "2024-01-15T10:00:00.000Z",
           });
 
@@ -287,7 +260,6 @@ describe("Property 2: Conversation context includes page content and history", (
             } as ExtractionResult),
             createStreamingClient: vi.fn().mockReturnValue(mockClient),
             tabState,
-            skillLibrary: createMockSkillLibrary(),
             clock: () => "2024-01-15T10:00:00.000Z",
           });
 
@@ -373,7 +345,6 @@ describe("Property 2: Conversation context includes page content and history", (
             } as ExtractionResult),
             createStreamingClient: vi.fn().mockReturnValue(mockClient),
             tabState,
-            skillLibrary: createMockSkillLibrary(),
             clock: () => "2024-01-15T10:00:00.000Z",
           });
 
@@ -473,7 +444,6 @@ describe("Property 2: Conversation context includes page content and history", (
             } as ExtractionResult),
             createStreamingClient: vi.fn().mockReturnValue(mockClient),
             tabState,
-            skillLibrary: createMockSkillLibrary(),
             clock: () => "2024-01-15T10:00:00.000Z",
           });
 

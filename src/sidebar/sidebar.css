@@ -43,12 +43,6 @@ html, body {
   flex-shrink: 0;
 }
 
-.sidebar-title {
-  font-size: 16px;
-  font-weight: 600;
-  color: #1a1a2e;
-}
-
 /* ─── Content Area ──────────────────────────────────────────────────────────── */
 
 .sidebar-content {
@@ -414,35 +408,6 @@ html, body {
   accent-color: #4f46e5;
 }
 
-/* ─── Auto Export ───────────────────────────────────────────────────────────── */
-
-.auto-export-section {
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid #f1f5f9;
-}
-
-.auto-export-label {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 12px;
-  color: #475569;
-  cursor: pointer;
-}
-
-.auto-export-toggle {
-  width: 14px;
-  height: 14px;
-  accent-color: #4f46e5;
-}
-
-.auto-export-status {
-  margin-top: 4px;
-  font-size: 11px;
-  color: #94a3b8;
-}
-
 /* ─── Config Warning Banner ─────────────────────────────────────────────────── */
 
 .config-warning-banner {
@@ -466,6 +431,17 @@ html, body {
   flex: 1;
 }
 
+.truncation-notice {
+  padding: 6px 12px;
+  margin: 8px 0;
+  background: #f3f4f6;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #4b5563;
+  text-align: center;
+}
+
 .settings-link-inline {
   flex-shrink: 0;
   color: #0d6efd;
@@ -477,9 +453,9 @@ html, body {
   text-decoration: underline;
 }
 
-/* ─── Persona Chat Summarize Action ─────────────────────────────────────────── */
+/* ─── Free-Chat Summarize Action ─────────────────────────────────────────── */
 
-.persona-summarize-action {
+.free-chat-summarize-action {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -570,7 +546,9 @@ html, body {
 
 .message-content h2,
 .message-content h3,
-.message-content h4 {
+.message-content h4,
+.message-content h5,
+.message-content h6 {
   margin: 12px 0 6px;
   font-size: 14px;
   font-weight: 600;
@@ -630,7 +608,7 @@ html, body {
 .sidebar-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
 }
 
 .btn-reset {
@@ -869,81 +847,6 @@ html, body {
   color: #374151;
 }
 
-
-/* ─── Skill Section ─────────────────────────────────────────────────────────── */
-
-.skill-section {
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid #f1f5f9;
-}
-
-.skill-picker {
-  width: 100%;
-  padding: 6px 8px;
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
-  font-family: inherit;
-  font-size: 12px;
-  color: #1a1a2e;
-  background: #fff;
-  cursor: pointer;
-  margin-bottom: 8px;
-}
-
-.skill-picker:focus {
-  border-color: #4f46e5;
-  outline: none;
-  box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.1);
-}
-
-.skill-controls {
-  display: flex;
-  gap: 8px;
-  margin-top: 8px;
-  flex-wrap: wrap;
-}
-
-.skill-error {
-  color: #dc2626;
-  font-size: 12px;
-  margin-top: 4px;
-}
-
-.skill-indicator {
-  font-size: 14px;
-  font-weight: 500;
-  color: #4f46e5;
-}
-
-.btn-clear-skill {
-  background: #fef2f2;
-  color: #dc2626;
-  border: 1px solid #fecaca;
-  padding: 4px 10px;
-  border-radius: 4px;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.btn-clear-skill:hover {
-  background: #fee2e2;
-}
-
-.btn-choose-skill {
-  background: #eff6ff;
-  color: #2563eb;
-  border: 1px solid #bfdbfe;
-  padding: 4px 10px;
-  border-radius: 4px;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.btn-choose-skill:hover {
-  background: #dbeafe;
-}
-
 /* Header controls container */
 .header-controls {
   display: flex;
@@ -951,12 +854,8 @@ html, body {
   gap: 4px;
 }
 
-/* ─── Bot Avatar ────────────────────────────────────────────────────────────── */
-
-.bot-avatar { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; margin-right: 8px; flex-shrink: 0; }
-.avatar-controls { display: flex; gap: 8px; margin-top: 4px; }
-.btn-choose-avatar { background: #eff6ff; color: #2563eb; border: 1px solid #bfdbfe; padding: 4px 10px; border-radius: 4px; font-size: 12px; cursor: pointer; }
-.btn-choose-avatar:hover { background: #dbeafe; }
-.btn-remove-avatar { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; padding: 4px 10px; border-radius: 4px; font-size: 12px; cursor: pointer; }
-.btn-remove-avatar:hover { background: #fee2e2; }
-.avatar-error { color: #dc2626; font-size: 12px; margin-top: 4px; }
+.btn-resummarize {
+  background: #eef2ff;
+  color: #4338ca;
+  border: 1px solid #c7d2fe;
+}

@@ -4,9 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Source of truth & process rules
 
-**`REQUIREMENTS.md` is the source of truth for intended behavior.** Core features are CF-1…CF-6
-(numbered acceptance criteria); secondary features are SF-1…SF-7. When code and REQUIREMENTS.md
-disagree, the code is wrong — unless you change REQUIREMENTS.md first.
+**The tests are the specification of intended behavior** — there is no separate requirements
+document. Features are tagged with stable IDs that appear in test names and code comments: core
+features CF-1…CF-6 (e.g. CF-3.8) and secondary features SF-1…SF-8 (e.g. SF-4). When code and
+its tests disagree, fix the code — unless you deliberately change the test first.
 
 Non-negotiable rules for every change:
 
@@ -14,8 +15,7 @@ Non-negotiable rules for every change:
    module boundaries (not implementation details).
 2. **Nothing is done until `npm test` (full suite) passes** — and a change is not "done" if it
    only passes the regression subset.
-3. **A change to a core feature requires updating the matching CF-x acceptance criterion in
-   REQUIREMENTS.md first**, then the tests, then the code.
+3. **A change to a core feature (CF-x) updates its tests first**, then the code.
 4. **Bug fixes are verified failing-then-passing**: write the test that proves the bug, watch it
    fail, fix, watch it pass.
 5. Tests that verify a CF criterion put the ID in their `describe` name (e.g.
@@ -38,6 +38,13 @@ npx vitest run src/background/chat/controller.test.ts
 
 # Run property-based tests only
 npx vitest run prop.test
+
+# Cut a release: bump version (manifest.json is authoritative, package.json follows),
+# run typecheck + full test suite, build, and zip dist/ into
+# web-ext-artifacts/distill-<version>.xpi (unsigned). On any failure, version files are
+# restored so a failed release never leaves a half-bumped tree.
+npm run release -- patch            # 3.0.0 → 3.0.1 (also: minor, major, or an explicit x.y.z)
+npm run release -- patch --skip-checks   # skip typecheck + tests — not for real releases
 ```
 
 Load in Firefox: `about:debugging#/runtime/this-firefox` → "Load Temporary Add-on" → select `dist/manifest.json`.
@@ -50,13 +57,13 @@ Four isolated contexts communicate only via typed message passing:
 
 1. **Background (persistent page)** — `src/background/main.ts` is thin wiring; the logic lives in
    factory modules: extraction service (`extraction.ts`), chat controller, settings manager,
-   secure store + credentials, export pipeline, auto-export scheduler, skill library.
+   secure store + credentials, export pipeline.
 2. **Content Script (per tab)** — `src/content/main.ts`: DOM extraction (Readability → Markdown),
    element picker, selector generation, selector preview.
 3. **Sidebar (per window)** — `src/sidebar/sidebar.ts`: chat UI state machine, active-tab
    tracking, clipboard delivery for exports, sanitized markdown rendering (`markdown.ts`).
 4. **Options page** — `src/options/options.ts`. Persists settings **through the background**
-   (`settingsChanged` / `autoExportConfigSave` / `apiKeySave` messages), never by writing
+   (`settingsChanged` / `apiKeySave` messages), never by writing
    settings to storage directly.
 
 ### Messaging System
@@ -64,7 +71,7 @@ Four isolated contexts communicate only via typed message passing:
 - **One-shot messages**: typed via `@shared/messages.ts` (closed union on `kind`). Use
   `buildMessage()`, `isMessageOfKind()`, `sendToBackground()`, `sendToTab()`.
 - **Long-lived port** (`browser.runtime.connect("chat")`): typed via `@shared/port-protocol.ts`
-  (union on `type`) for streaming tokens, session management, skills, auto-export control.
+  (union on `type`) for streaming tokens, and session management.
   The sidebar port also receives one-shot-style `clipboardWrite` envelopes for CF-4.4.
 
 ### Key Design Patterns
@@ -82,26 +89,20 @@ Four isolated contexts communicate only via typed message passing:
 - **Site patterns**: user patterns ALWAYS beat builtins; the only builtin list lives in
   `site-patterns/matcher.ts` (`BUILTIN_PATTERNS`) — settings hold user patterns only, and
   legacy builtin entries in stored settings are deliberately ignored (CF-6.2).
+- **AI providers** (`@shared/providers`, CF-5.7): `settings.ai.provider` is `"ollama"` (default) or `"openai-compatible"` and — not the URL — decides Ollama-only behavior (`num_ctx` override, prompt budgeting). Both talk to `<baseUrl>/v1/chat/completions`. Settings saved before providers existed are migrated by `backfillDefaults` using `inferProvider(baseUrl)` (loopback / port 11434 → ollama, else openai-compatible, empty → default), so an upgrade never starts sending Ollama-only fields to a hosted API.
 - **API keys**: settings hold only `apiKeyRef`; the key is stored via `secure-store.ts` through
   `credentials.ts` (`apiKeySave` message). Empty key = keyless endpoint (Ollama at home); the
   work fork requires the key path to genuinely authenticate (CF-5.3). No Authorization header
   is sent when the key is empty.
-- **Auto-export skip-if-unchanged**: FNV-1a hash over the FULL content; `lastHash` is recorded
-  only after a successful export (SF-4).
+- **Removed features**: auto-export (scheduler, per-origin configs, `alarms` permission), personas, skills (upload, library, picker, composite prompt) and the bot avatar are all gone. Storage from older versions is cleaned up at background startup by `removeLegacyStorage` (`legacy-cleanup.ts`: `distill_skill_library`, `distill_active_skill`, `distill_bot_avatar`), and `settings.autoExportConfigs` is ignored and dropped on the next save. The sidebar's no-page chat (about:blank) is the "free-chat" mode (`freeChatReady`).
+- **Export sections** (CF-4): the sidebar has three checkboxes — Summary (on), Content (off), Q&A (off), kept in module state across re-renders — sent as `includeSummary` / `includeContent` / `includeQA`. The Export button is disabled when none is checked, and the manager returns `nothing-to-export` rather than writing a frontmatter-only file. Document order is Summary → Q&A → Content.
 - **Retry**: the controller is the single source of truth (< 3 consecutive failures); the
   sidebar keeps no counter, and a retried message appears exactly once in the prompt (CF-3.2/3.3).
+- **Context budget** (`background/chat/context-budget.ts`, CF-3.8): prompts are fitted to the configured context window (4 chars/token estimate, 25% reserved for the reply) by dropping the OLDEST conversation turns first — never the system prompt or the new message (a retried message is pinned, not droppable history). Article bodies are fitted first (CF-3.9): shortened — never dropped — by water-filling against the budget minus the pinned prompt text (`contextTruncated`). The budget applies ONLY when `settings.ai.provider === "ollama"`; OpenAI-compatible providers get an infinite budget and are never trimmed.
+- **Debug logging** (`shared/logger.ts`, SF-8): factories take an optional `logger` (default `noopLogger`); output is gated by a `getEnabled()` setting and prefixed `[Distill]`. Inject it rather than calling `console` directly.
 - **Markdown rendering** (`sidebar/markdown.ts`) is a security boundary: quotes are escaped and
   only http(s) links become anchors (CF-3.5). Never render untrusted text via innerHTML
   without it.
-
-### Skills System
-
-Skills are user-loaded markdown files with YAML frontmatter (`name`, `description`) and `##`
-sections (Personality required; Knowledge, Commands, Activation, extras). Parsed by
-`@shared/skill-parser.ts`, composed by `@shared/composite-prompt.ts` (Activation is NEVER in the
-prompt). Library CRUD in `@background/skill-library.ts` (`distill_skill_library` in
-storage.local); the controller re-reads active skills before each request so options-page
-changes apply immediately.
 
 ## Testing
 
@@ -124,7 +125,7 @@ All external deps (browser APIs, fetch, crypto) are injected. The suite must pas
 
 ## Reference
 
-- `REQUIREMENTS.md` — intended behavior (source of truth) + resolved design decisions Q1–Q18
 - `AUDIT.md` — the 2026-07 audit that drove the current test coverage and defect fixes
 - `README.md` — user-facing docs, Mermaid architecture diagrams, configuration reference
-- `.kiro/specs/distill/` — the ORIGINAL spec; partially stale, superseded by REQUIREMENTS.md
+- `scripts/release.mjs` — version bump + build + packaging (`npm run release`); produces the
+  unsigned `.xpi` artifacts in `web-ext-artifacts/` (git-ignored)

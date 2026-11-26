@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { createSettingsManager, validateSettings } from "./manager";
+import { createSettingsManager, validateSettings, broadcastSettingsChanged } from "./manager";
 import type { PartialSettings, FieldError } from "./manager";
 import type { StorageAdapter, StorageSetResult } from "@shared/storage";
 import type { Settings } from "@shared/types";
@@ -117,6 +117,45 @@ describe("CF-5 SettingsManager", () => {
       const settings = await manager.get();
       expect(settings.ai.baseUrl).toBe("https://saved-to-local.example");
     });
+
+    it("CF-5.6 backfills contextWindowTokens with the default for settings persisted before the field existed", async () => {
+      const syncStorage = createMockStorage();
+      // Simulate a pre-upgrade stored object: no contextWindowTokens on ai at all.
+      const legacyStored = {
+        ...DEFAULT_SETTINGS,
+        ai: { baseUrl: "https://api.example.com", modelId: "gpt-4", apiKeyRef: null, systemPrompt: "" },
+      };
+      syncStorage.data.set("settings", legacyStored);
+
+      const manager = createSettingsManager({
+        syncStorage,
+        localStorage: createMockStorage(),
+        broadcast: () => {},
+      });
+
+      const settings = await manager.get();
+      expect(settings.ai.contextWindowTokens).toBe(DEFAULT_SETTINGS.ai.contextWindowTokens);
+      expect(settings.ai.baseUrl).toBe("https://api.example.com"); // untouched
+    });
+
+    it("SF-8 backfills debugLogging with false for settings persisted before the field existed", async () => {
+      const syncStorage = createMockStorage();
+      const legacyStored = {
+        ...DEFAULT_SETTINGS,
+        ai: { ...DEFAULT_SETTINGS.ai },
+      };
+      delete (legacyStored as { debugLogging?: boolean }).debugLogging;
+      syncStorage.data.set("settings", legacyStored);
+
+      const manager = createSettingsManager({
+        syncStorage,
+        localStorage: createMockStorage(),
+        broadcast: () => {},
+      });
+
+      const settings = await manager.get();
+      expect(settings.debugLogging).toBe(false);
+    });
   });
 
   describe("update()", () => {
@@ -138,6 +177,87 @@ describe("CF-5 SettingsManager", () => {
         expect(result.settings.ai.baseUrl).toBe("https://api.openai.com");
         expect(result.settings.ai.modelId).toBe(""); // unchanged
         expect(result.settings.ai.apiKeyRef).toBeNull(); // unchanged
+      }
+    });
+
+    it("merges a partial AI config patch including contextWindowTokens", async () => {
+      const syncStorage = createMockStorage();
+      const manager = createSettingsManager({
+        syncStorage,
+        localStorage: createMockStorage(),
+        broadcast: () => {},
+      });
+
+      const result = await manager.update({
+        ai: { contextWindowTokens: 32_000 },
+      });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.settings.ai.contextWindowTokens).toBe(32_000);
+        expect(result.settings.ai.baseUrl).toBe(""); // unchanged
+      }
+    });
+
+    it("CF-5.6 succeeds on a non-ai patch even when stored settings predate contextWindowTokens", async () => {
+      const syncStorage = createMockStorage();
+      const legacyStored = {
+        ...DEFAULT_SETTINGS,
+        ai: { baseUrl: "", modelId: "", apiKeyRef: null, systemPrompt: "" },
+      };
+      syncStorage.data.set("settings", legacyStored);
+
+      const manager = createSettingsManager({
+        syncStorage,
+        localStorage: createMockStorage(),
+        broadcast: () => {},
+      });
+
+      const newPatterns = [
+        { id: "user-1", source: "user" as const, urlMatchPattern: "*://*.example.com/*", contentSelector: ".content" },
+      ];
+      const result = await manager.update({ sitePatterns: newPatterns });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.settings.ai.contextWindowTokens).toBe(DEFAULT_SETTINGS.ai.contextWindowTokens);
+      }
+    });
+
+    it("SF-8 merges a debugLogging patch", async () => {
+      const syncStorage = createMockStorage();
+      const manager = createSettingsManager({
+        syncStorage,
+        localStorage: createMockStorage(),
+        broadcast: () => {},
+      });
+
+      const result = await manager.update({ debugLogging: true });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.settings.debugLogging).toBe(true);
+        expect(result.settings.ai.baseUrl).toBe(""); // unchanged
+      }
+    });
+
+    it("SF-8 succeeds on an unrelated patch even when stored settings predate debugLogging", async () => {
+      const syncStorage = createMockStorage();
+      const legacyStored = { ...DEFAULT_SETTINGS };
+      delete (legacyStored as { debugLogging?: boolean }).debugLogging;
+      syncStorage.data.set("settings", legacyStored);
+
+      const manager = createSettingsManager({
+        syncStorage,
+        localStorage: createMockStorage(),
+        broadcast: () => {},
+      });
+
+      const result = await manager.update({ ai: { modelId: "gpt-4" } });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.settings.debugLogging).toBe(false);
       }
     });
 
@@ -412,6 +532,46 @@ describe("CF-5.2 validateSettings", () => {
     });
   });
 
+  describe("CF-5.6 ai.contextWindowTokens", () => {
+    it("accepts the default (8192)", () => {
+      const settings: Settings = { ...DEFAULT_SETTINGS, ai: { ...DEFAULT_SETTINGS.ai, contextWindowTokens: 8192 } };
+      const errors = validateSettings(settings);
+      expect(errors.filter((e) => e.field === "ai.contextWindowTokens")).toHaveLength(0);
+    });
+
+    it("accepts the minimum (512) and maximum (10,000,000)", () => {
+      for (const contextWindowTokens of [512, 10_000_000]) {
+        const settings: Settings = { ...DEFAULT_SETTINGS, ai: { ...DEFAULT_SETTINGS.ai, contextWindowTokens } };
+        expect(validateSettings(settings).filter((e) => e.field === "ai.contextWindowTokens")).toHaveLength(0);
+      }
+    });
+
+    it("rejects values below 512 and above 10,000,000", () => {
+      for (const contextWindowTokens of [1, 8, 511, 10_000_001]) {
+        const settings: Settings = { ...DEFAULT_SETTINGS, ai: { ...DEFAULT_SETTINGS.ai, contextWindowTokens } };
+        expect(validateSettings(settings).filter((e) => e.field === "ai.contextWindowTokens")).toHaveLength(1);
+      }
+    });
+
+    it("rejects zero", () => {
+      const settings: Settings = { ...DEFAULT_SETTINGS, ai: { ...DEFAULT_SETTINGS.ai, contextWindowTokens: 0 } };
+      const errors = validateSettings(settings);
+      expect(errors.filter((e) => e.field === "ai.contextWindowTokens")).toHaveLength(1);
+    });
+
+    it("rejects negative values", () => {
+      const settings: Settings = { ...DEFAULT_SETTINGS, ai: { ...DEFAULT_SETTINGS.ai, contextWindowTokens: -1 } };
+      const errors = validateSettings(settings);
+      expect(errors.filter((e) => e.field === "ai.contextWindowTokens")).toHaveLength(1);
+    });
+
+    it("rejects non-integer values", () => {
+      const settings: Settings = { ...DEFAULT_SETTINGS, ai: { ...DEFAULT_SETTINGS.ai, contextWindowTokens: 100.5 } };
+      const errors = validateSettings(settings);
+      expect(errors.filter((e) => e.field === "ai.contextWindowTokens")).toHaveLength(1);
+    });
+  });
+
   describe("export.filenamePattern", () => {
     it("accepts non-empty pattern", () => {
       const settings: Settings = { ...DEFAULT_SETTINGS };
@@ -476,76 +636,12 @@ describe("CF-5.2 validateSettings", () => {
     });
   });
 
-  describe("autoExportConfigs[].intervalMinutes", () => {
-    it("accepts interval of 1", () => {
-      const settings: Settings = {
-        ...DEFAULT_SETTINGS,
-        autoExportConfigs: [makeAutoExportConfig({ intervalMinutes: 1 })],
-      };
-      const errors = validateSettings(settings);
-      expect(errors.filter((e) => e.field.includes("intervalMinutes"))).toHaveLength(0);
-    });
-
-    it("accepts interval of 120", () => {
-      const settings: Settings = {
-        ...DEFAULT_SETTINGS,
-        autoExportConfigs: [makeAutoExportConfig({ intervalMinutes: 120 })],
-      };
-      const errors = validateSettings(settings);
-      expect(errors.filter((e) => e.field.includes("intervalMinutes"))).toHaveLength(0);
-    });
-
-    it("rejects interval of 0", () => {
-      const settings: Settings = {
-        ...DEFAULT_SETTINGS,
-        autoExportConfigs: [makeAutoExportConfig({ intervalMinutes: 0 })],
-      };
-      const errors = validateSettings(settings);
-      expect(errors.filter((e) => e.field.includes("intervalMinutes"))).toHaveLength(1);
-    });
-
-    it("rejects interval of 121", () => {
-      const settings: Settings = {
-        ...DEFAULT_SETTINGS,
-        autoExportConfigs: [makeAutoExportConfig({ intervalMinutes: 121 })],
-      };
-      const errors = validateSettings(settings);
-      expect(errors.filter((e) => e.field.includes("intervalMinutes"))).toHaveLength(1);
-    });
-
-    it("rejects non-integer interval", () => {
-      const settings: Settings = {
-        ...DEFAULT_SETTINGS,
-        autoExportConfigs: [makeAutoExportConfig({ intervalMinutes: 5.5 })],
-      };
-      const errors = validateSettings(settings);
-      expect(errors.filter((e) => e.field.includes("intervalMinutes"))).toHaveLength(1);
-    });
-
-    it("validates each config independently", () => {
-      const settings: Settings = {
-        ...DEFAULT_SETTINGS,
-        autoExportConfigs: [
-          makeAutoExportConfig({ intervalMinutes: 10 }),
-          makeAutoExportConfig({ intervalMinutes: 0 }),
-          makeAutoExportConfig({ intervalMinutes: 200 }),
-        ],
-      };
-      const errors = validateSettings(settings);
-      const intervalErrors = errors.filter((e) => e.field.includes("intervalMinutes"));
-      expect(intervalErrors).toHaveLength(2);
-      expect(intervalErrors[0].field).toBe("autoExportConfigs[1].intervalMinutes");
-      expect(intervalErrors[1].field).toBe("autoExportConfigs[2].intervalMinutes");
-    });
-  });
-
   describe("multiple validation errors", () => {
     it("returns all errors at once", () => {
       const settings: Settings = {
         ...DEFAULT_SETTINGS,
-        ai: { ...DEFAULT_SETTINGS.ai, baseUrl: "invalid-url" },
+        ai: { ...DEFAULT_SETTINGS.ai, baseUrl: "invalid-url", contextWindowTokens: 8 },
         export: { ...DEFAULT_SETTINGS.export, filenamePattern: "" },
-        autoExportConfigs: [makeAutoExportConfig({ intervalMinutes: 0 })],
       };
       const errors = validateSettings(settings);
       expect(errors.length).toBeGreaterThanOrEqual(3);
@@ -553,20 +649,154 @@ describe("CF-5.2 validateSettings", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+describe("SF-8 logging", () => {
+  function makeSpyLogger() {
+    return { debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
+  }
 
-function makeAutoExportConfig(overrides: Partial<Settings["autoExportConfigs"][number]> = {}): Settings["autoExportConfigs"][number] {
-  return {
-    origin: "https://example.com",
-    enabled: true,
-    intervalMinutes: 15,
-    destination: { kind: "download" },
-    mode: "content-only",
-    skipIfUnchanged: false,
-    createdAt: "2024-01-01T00:00:00Z",
-    updatedAt: "2024-01-01T00:00:00Z",
-    ...overrides,
-  };
-}
+  it("logs a warn with field errors when an update fails validation", async () => {
+    const logger = makeSpyLogger();
+    const manager = createSettingsManager({
+      syncStorage: createMockStorage(),
+      localStorage: createMockStorage(),
+      broadcast: () => {},
+      logger,
+    });
+
+    await manager.update({ ai: { baseUrl: "not-a-url" } });
+
+    expect(logger.warn).toHaveBeenCalled();
+    const [, ...args] = logger.warn.mock.calls[0];
+    expect(JSON.stringify(args)).toContain("ai.baseUrl");
+  });
+
+  it("logs a warn when a sync quota-exceeded fallback to local storage happens", async () => {
+    const logger = makeSpyLogger();
+    const manager = createSettingsManager({
+      syncStorage: createQuotaExceededStorage(),
+      localStorage: createMockStorage(),
+      broadcast: () => {},
+      logger,
+    });
+
+    const result = await manager.update({ ai: { baseUrl: "https://api.example.com" } });
+
+    expect(result.ok).toBe(true);
+    expect(logger.warn).toHaveBeenCalled();
+  });
+
+  it("logs a debug message on a successful save", async () => {
+    const logger = makeSpyLogger();
+    const manager = createSettingsManager({
+      syncStorage: createMockStorage(),
+      localStorage: createMockStorage(),
+      broadcast: () => {},
+      logger,
+    });
+
+    const result = await manager.update({ ai: { baseUrl: "https://api.example.com" } });
+
+    expect(result.ok).toBe(true);
+    expect(logger.debug).toHaveBeenCalled();
+  });
+
+  it("does not log anything when no logger is provided (default is safe)", async () => {
+    const manager = createSettingsManager({
+      syncStorage: createMockStorage(),
+      localStorage: createMockStorage(),
+      broadcast: () => {},
+    });
+
+    await expect(manager.update({ ai: { baseUrl: "https://api.example.com" } })).resolves.toEqual(
+      expect.objectContaining({ ok: true }),
+    );
+  });
+});
+
+describe("SF-8 broadcastSettingsChanged reaches content scripts", () => {
+  it("sends settingsChanged to extension pages AND to every open tab, ignoring tabs without a listener", async () => {
+    const runtimeSend = vi.fn().mockResolvedValue(undefined);
+    const tabSend = vi.fn().mockImplementation(async (tabId: number) => {
+      if (tabId === 2) throw new Error("Could not establish connection. Receiving end does not exist.");
+    });
+    const query = vi.fn().mockResolvedValue([{ id: 1 }, { id: 2 }, { id: 3 }, {}]);
+    (globalThis as unknown as { browser: unknown }).browser = {
+      runtime: { sendMessage: runtimeSend },
+      tabs: { query, sendMessage: tabSend },
+    };
+    try {
+      await broadcastSettingsChanged(DEFAULT_SETTINGS);
+      expect(runtimeSend).toHaveBeenCalledTimes(1);
+      expect(runtimeSend.mock.calls[0][0]).toMatchObject({ kind: "settingsChanged" });
+      expect(tabSend.mock.calls.map((c) => c[0]).sort()).toEqual([1, 2, 3]);
+      // Tabs get only what a content script needs — never the full settings (site patterns,
+      // auto-export configs, apiKeyRef).
+      expect(tabSend.mock.calls[0][1]).toMatchObject({ kind: "debugLoggingChanged", payload: { enabled: DEFAULT_SETTINGS.debugLogging } });
+      expect(JSON.stringify(tabSend.mock.calls[0][1])).not.toContain("sitePatterns");
+    } finally {
+      delete (globalThis as unknown as { browser?: unknown }).browser;
+    }
+  });
+
+  it("never throws when tabs.query itself fails", async () => {
+    (globalThis as unknown as { browser: unknown }).browser = {
+      runtime: { sendMessage: vi.fn().mockResolvedValue(undefined) },
+      tabs: { query: vi.fn().mockRejectedValue(new Error("nope")), sendMessage: vi.fn() },
+    };
+    try {
+      await expect(broadcastSettingsChanged(DEFAULT_SETTINGS)).resolves.toBeUndefined();
+    } finally {
+      delete (globalThis as unknown as { browser?: unknown }).browser;
+    }
+  });
+});
+
+describe("CF-5.7 ai.provider", () => {
+  it("validateSettings accepts both providers", () => {
+    for (const provider of ["ollama", "openai-compatible"] as const) {
+      const settings: Settings = { ...DEFAULT_SETTINGS, ai: { ...DEFAULT_SETTINGS.ai, provider } };
+      expect(validateSettings(settings).filter((e) => e.field === "ai.provider")).toHaveLength(0);
+    }
+  });
+
+  it("validateSettings rejects an unknown provider", () => {
+    const settings = { ...DEFAULT_SETTINGS, ai: { ...DEFAULT_SETTINGS.ai, provider: "bogus" } } as unknown as Settings;
+    expect(validateSettings(settings).filter((e) => e.field === "ai.provider")).toHaveLength(1);
+  });
+
+  it("update() persists a provider change and leaves the other AI fields alone", async () => {
+    const manager = createSettingsManager({
+      syncStorage: createMockStorage(), localStorage: createMockStorage(), broadcast: () => {},
+    });
+    const result = await manager.update({ ai: { provider: "openai-compatible" } });
+    expect(result.ok).toBe(true);
+    const settings = await manager.get();
+    expect(settings.ai.provider).toBe("openai-compatible");
+    expect(settings.ai.contextWindowTokens).toBe(DEFAULT_SETTINGS.ai.contextWindowTokens);
+  });
+
+  it("get() backfills the provider for settings stored before providers existed", async () => {
+    const syncStorage = createMockStorage();
+    const { provider: _p, ...aiWithout } = DEFAULT_SETTINGS.ai;
+    syncStorage.data.set("settings", { ...DEFAULT_SETTINGS, ai: { ...aiWithout, baseUrl: "https://api.openai.com" } });
+    const manager = createSettingsManager({ syncStorage, localStorage: createMockStorage(), broadcast: () => {} });
+    expect((await manager.get()).ai.provider).toBe("openai-compatible");
+  });
+});
+
+describe("settings saved while auto-export existed", () => {
+  it("get() ignores the leftover autoExportConfigs and the next save drops them", async () => {
+    const syncStorage = createMockStorage();
+    syncStorage.data.set("settings", {
+      ...DEFAULT_SETTINGS,
+      autoExportConfigs: [{ origin: "https://example.com", enabled: true, intervalMinutes: 15 }],
+    });
+    const manager = createSettingsManager({ syncStorage, localStorage: createMockStorage(), broadcast: () => {} });
+
+    expect((await manager.get()).ai.provider).toBe("ollama");
+
+    const result = await manager.update({ debugLogging: true });
+    expect(result.ok).toBe(true);
+    expect("autoExportConfigs" in (syncStorage.data.get("settings") as object)).toBe(false);
+  });
+});

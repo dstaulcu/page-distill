@@ -1,7 +1,7 @@
 /**
  * Sidebar entry point — vanilla TypeScript UI for the Distill chat interface.
  *
- * State machine: loading → no-page | persona-chat | summarizing → ready → streaming → error → config-error
+ * State machine: loading → no-page | free-chat | summarizing → ready → streaming → error → config-error
  * Connects to background via long-lived port ("chat") and exchanges typed port protocol messages.
  */
 
@@ -11,22 +11,57 @@ import {
   type ControllerToSidebarMessage,
   type SidebarToControllerMessage,
   type PortConversationMessage,
-  type PortAutoExportStatus,
-  type SkillLibrarySnapshot,
-  type ActiveSelectionPort,
   isControllerToSidebarMessage,
 } from "@shared/port-protocol";
 import { isMessageOfKind, buildMessage } from "@shared/messages";
+import { createLogger } from "@shared/logger";
 
 // ─── State Machine ───────────────────────────────────────────────────────────
 
 type SidebarState =
   | { readonly phase: "loading" }
   | { readonly phase: "no-page" }
-  | { readonly phase: "persona-chat"; readonly messages: ReadonlyArray<PortConversationMessage> }
-  | { readonly phase: "summarizing"; readonly title: string; readonly partialContent: string; readonly returnPhase: "ready" | "persona-chat" }
-  | { readonly phase: "ready"; readonly messages: ReadonlyArray<PortConversationMessage> }
-  | { readonly phase: "streaming"; readonly messages: ReadonlyArray<PortConversationMessage>; readonly partial: string; readonly returnPhase: "ready" | "persona-chat" }
+  | {
+      readonly phase: "free-chat";
+      readonly messages: ReadonlyArray<PortConversationMessage>;
+      // Carried over from the request that just finished (CF-3.8/CF-3.9) so
+      // the truncation notes stay visible after the reply completes.
+      readonly historyTruncated?: boolean;
+      readonly contextTruncated?: boolean;
+    }
+  | {
+      readonly phase: "summarizing";
+      readonly title: string;
+      readonly partialContent: string;
+      readonly returnPhase: "ready" | "free-chat";
+      // Conversation already on screen when an (updated) summary was requested;
+      // the new summary is appended to it rather than replacing it.
+      readonly priorMessages: ReadonlyArray<PortConversationMessage>;
+      // Set from streamStart's contextTruncated (CF-3.9) — a context tab
+      // was dropped from the summarize request to fit the context window.
+      readonly contextTruncated?: boolean;
+    }
+  | {
+      readonly phase: "ready";
+      readonly messages: ReadonlyArray<PortConversationMessage>;
+      // Carried over from the request that just finished (CF-3.8/CF-3.9) so
+      // the truncation notes stay visible after the reply completes.
+      readonly historyTruncated?: boolean;
+      readonly contextTruncated?: boolean;
+    }
+  | {
+      readonly phase: "streaming";
+      readonly messages: ReadonlyArray<PortConversationMessage>;
+      readonly partial: string;
+      readonly returnPhase: "ready" | "free-chat";
+      // Set from streamStart's historyTruncated (CF-3.8) — surfaced as a
+      // small note so trimming the oldest turns to fit the model's context
+      // window is never silent.
+      readonly historyTruncated?: boolean;
+      // Set from streamStart's contextTruncated (CF-3.9) — a context tab
+      // was dropped from this request to fit the context window.
+      readonly contextTruncated?: boolean;
+    }
   | {
       readonly phase: "error";
       readonly reason: string;
@@ -35,7 +70,7 @@ type SidebarState =
       // The conversation stays visible alongside the error (CF-3.3), and a
       // retried stream returns to the phase the failure came from.
       readonly messages: ReadonlyArray<PortConversationMessage>;
-      readonly returnPhase: "ready" | "persona-chat";
+      readonly returnPhase: "ready" | "free-chat";
     }
   | { readonly phase: "config-error"; readonly reason: string };
 
@@ -55,7 +90,6 @@ const EXTENSION_VERSION = browser.runtime.getManifest().version;
 // ─── Module State ────────────────────────────────────────────────────────────
 
 let state: SidebarState = { phase: "loading" };
-let autoExportStatus: PortAutoExportStatus | null = null;
 let port: ReturnType<typeof browser.runtime.connect> | null = null;
 let tracker: ActiveTabTracker | null = null;
 let currentTabId: number | null = null;
@@ -75,9 +109,26 @@ let hasSavedPattern = false; // Whether the current site has a saved selector
 let lowConfidence = false; // Whether extraction had low confidence
 let pageWordCount: number | null = null; // Word count of extracted content (for reading-time estimate)
 let configWarning: string | null = null; // Non-blocking AI config warning
-let botAvatarDataUri: string | null = null; // Bot avatar data URI (independent of skill)
-let avatarError: string | null = null; // Avatar validation error message
 let showHelpMenu = false;
+
+// Export sections chosen with the checkboxes in the footer (see renderFooter).
+const exportOptions = { summary: true, content: false, qa: false };
+
+// SF-8: gated by settings.debugLogging — read from storage at startup
+// (mirroring getDefaultExportDestination's direct-read pattern) and kept live
+// by the settingsChanged broadcast the background sends on every save.
+let debugLoggingEnabled = false;
+const logger = createLogger({ getEnabled: () => debugLoggingEnabled });
+try {
+  browser.runtime.onMessage.addListener((message: unknown) => {
+    if (isMessageOfKind(message, "settingsChanged")) {
+      debugLoggingEnabled = message.payload.debugLogging === true;
+    }
+    return undefined;
+  });
+} catch {
+  // No runtime messaging available — the startup read still applies.
+}
 
 // ─── Context Tab State ───────────────────────────────────────────────────────
 
@@ -87,17 +138,6 @@ let showTabPicker = false;
 let contextTabError: string | null = null;
 let contextTabErrorTimeout: ReturnType<typeof setTimeout> | null = null;
 
-// ─── Skill State ─────────────────────────────────────────────────────────────
-
-let activeSkillName: string | null = null;
-let activeSkillDescription: string | null = null;
-let skillError: string | null = null;
-let skillErrorTimeout: ReturnType<typeof setTimeout> | null = null;
-
-// ─── Library State ──────────────────────────────────────────────────────────
-
-let librarySnapshot: SkillLibrarySnapshot | null = null;
-
 // ─── DOM References ──────────────────────────────────────────────────────────
 
 const app = document.getElementById("app")!;
@@ -105,6 +145,7 @@ const app = document.getElementById("app")!;
 // ─── Port Communication ──────────────────────────────────────────────────────
 
 function connectPort(): void {
+  logger.debug("Port connecting");
   port = browser.runtime.connect({ name: "chat" });
 
   port.onMessage.addListener((raw: unknown) => {
@@ -119,12 +160,18 @@ function connectPort(): void {
   });
 
   port.onDisconnect.addListener(() => {
+    logger.debug("Port disconnected");
     port = null;
   });
 }
 
 async function handleClipboardWrite(content: string): Promise<void> {
   const ok = await writeToClipboard(content);
+  if (ok) {
+    logger.debug("Clipboard write succeeded");
+  } else {
+    logger.warn("Clipboard write failed");
+  }
   if (port) {
     port.postMessage(buildMessage("clipboardResult", ok ? { ok: true } : { ok: false, reason: "clipboard-write-failed" }));
   }
@@ -172,7 +219,7 @@ function sendToController(msg: SidebarToControllerMessage): void {
 
 function handleControllerMessage(msg: ControllerToSidebarMessage): void {
   switch (msg.type) {
-    case "personaModeReady":
+    case "freeChatReady":
       // A resync init (CF-3.6 reconnect replay) answering while the user is
       // already mid-send must not clobber their in-flight conversation.
       if (resyncInFlight) {
@@ -180,9 +227,9 @@ function handleControllerMessage(msg: ControllerToSidebarMessage): void {
         render();
         break;
       }
-      // about:blank or similar — enter persona chat mode with no page context
+      // about:blank or similar — enter free-chat mode with no page context
       contextTabs = [];
-      state = { phase: "persona-chat", messages: msg.messages ? [...msg.messages] : [] };
+      state = { phase: "free-chat", messages: msg.messages ? [...msg.messages] : [] };
       configWarning = null;
       render();
       break;
@@ -248,6 +295,7 @@ function handleControllerMessage(msg: ControllerToSidebarMessage): void {
       break;
 
     case "contextError":
+      logger.warn("Context error", msg.reason, `canRetry=${msg.canRetry}`);
       if (resyncInFlight) {
         resyncInFlight = false;
         render();
@@ -282,17 +330,24 @@ function handleControllerMessage(msg: ControllerToSidebarMessage): void {
       break;
 
     case "streamStart":
+      logger.debug("Stream started", `historyTruncated=${!!msg.historyTruncated}`, `contextTruncated=${!!msg.contextTruncated}`);
       if (state.phase === "summarizing") {
-        // Stay in summarizing, streaming will come via tokens
+        // Stay in summarizing, streaming will come via tokens — but still
+        // fold in whether a context tab was dropped for this request (CF-3.9).
+        state = { ...state, contextTruncated: msg.contextTruncated };
       } else if (state.phase === "ready") {
-        state = { phase: "streaming", messages: state.messages, partial: "", returnPhase: "ready" };
-      } else if (state.phase === "persona-chat") {
-        state = { phase: "streaming", messages: state.messages, partial: "", returnPhase: "persona-chat" };
+        state = { phase: "streaming", messages: state.messages, partial: "", returnPhase: "ready", historyTruncated: msg.historyTruncated, contextTruncated: msg.contextTruncated };
+      } else if (state.phase === "free-chat") {
+        state = { phase: "streaming", messages: state.messages, partial: "", returnPhase: "free-chat", historyTruncated: msg.historyTruncated, contextTruncated: msg.contextTruncated };
       } else if (state.phase === "error") {
         // Retried stream — render it exactly like a first attempt (CF-3.3)
-        state = { phase: "streaming", messages: state.messages, partial: "", returnPhase: state.returnPhase };
+        state = { phase: "streaming", messages: state.messages, partial: "", returnPhase: state.returnPhase, historyTruncated: msg.historyTruncated, contextTruncated: msg.contextTruncated };
       } else if (state.phase === "loading") {
-        state = { phase: "streaming", messages: [], partial: "", returnPhase: "ready" };
+        state = { phase: "streaming", messages: [], partial: "", returnPhase: "ready", historyTruncated: msg.historyTruncated, contextTruncated: msg.contextTruncated };
+      } else if (state.phase === "streaming") {
+        // submitMessage() already optimistically switched to "streaming"
+        // before this real streamStart arrived — just fold in the flags.
+        state = { ...state, historyTruncated: msg.historyTruncated, contextTruncated: msg.contextTruncated };
       }
       render();
       break;
@@ -320,6 +375,7 @@ function handleControllerMessage(msg: ControllerToSidebarMessage): void {
     }
 
     case "streamEnd": {
+      logger.debug("Stream ended", `chars=${msg.fullContent.length}`);
       // An empty fullContent means an aborted stream with nothing received —
       // don't append an empty assistant message.
       const hasContent = msg.fullContent.trim().length > 0;
@@ -330,17 +386,19 @@ function handleControllerMessage(msg: ControllerToSidebarMessage): void {
         model: msg.model,
       };
       if (state.phase === "summarizing") {
-        const newMessages = hasContent ? [endMsg] : [];
-        state = state.returnPhase === "persona-chat"
-          ? { phase: "persona-chat", messages: newMessages }
-          : { phase: "ready", messages: newMessages };
+        const newMessages = hasContent ? [...state.priorMessages, endMsg] : [...state.priorMessages];
+        const notes = { contextTruncated: state.contextTruncated };
+        state = state.returnPhase === "free-chat"
+          ? { phase: "free-chat", messages: newMessages, ...notes }
+          : { phase: "ready", messages: newMessages, ...notes };
       } else if (state.phase === "streaming") {
         const returnPhase = state.returnPhase;
         const newMessages = hasContent ? [...state.messages, endMsg] : [...state.messages];
-        if (returnPhase === "persona-chat") {
-          state = { phase: "persona-chat", messages: newMessages };
+        const notes = { historyTruncated: state.historyTruncated, contextTruncated: state.contextTruncated };
+        if (returnPhase === "free-chat") {
+          state = { phase: "free-chat", messages: newMessages, ...notes };
         } else {
-          state = { phase: "ready", messages: newMessages };
+          state = { phase: "ready", messages: newMessages, ...notes };
         }
       }
       render();
@@ -348,16 +406,19 @@ function handleControllerMessage(msg: ControllerToSidebarMessage): void {
     }
 
     case "streamError": {
+      logger.warn("Stream error", msg.reason, `canRetry=${msg.canRetry}`);
       // Keep the conversation visible alongside the error; the controller is
       // the single source of truth for whether retry is still allowed (CF-3.3).
-      const prior: { messages: ReadonlyArray<PortConversationMessage>; returnPhase: "ready" | "persona-chat" } =
+      const prior: { messages: ReadonlyArray<PortConversationMessage>; returnPhase: "ready" | "free-chat" } =
         state.phase === "streaming"
           ? { messages: state.messages, returnPhase: state.returnPhase }
-          : state.phase === "persona-chat"
-            ? { messages: state.messages, returnPhase: "persona-chat" }
+          : state.phase === "free-chat"
+            ? { messages: state.messages, returnPhase: "free-chat" }
             : state.phase === "ready"
               ? { messages: state.messages, returnPhase: "ready" }
-              : { messages: [], returnPhase: "ready" };
+              : state.phase === "summarizing"
+                ? { messages: state.priorMessages, returnPhase: state.returnPhase }
+                : { messages: [], returnPhase: "ready" };
       state = {
         phase: "error",
         reason: msg.reason,
@@ -377,82 +438,17 @@ function handleControllerMessage(msg: ControllerToSidebarMessage): void {
         render();
         break;
       }
-      if (state.phase === "ready" || state.phase === "summarizing" || state.phase === "persona-chat") {
+      if (state.phase === "ready" || state.phase === "summarizing" || state.phase === "free-chat") {
         configWarning = msg.reason;
         // summarizing can't stay mid-stream without AI; drop back to the
-        // phase it was summarizing for, preserving persona-chat's context
-        if (state.phase === "summarizing") state = { phase: state.returnPhase, messages: [] };
+        // phase it was summarizing for, preserving free-chat's context
+        if (state.phase === "summarizing") state = { phase: state.returnPhase, messages: state.priorMessages };
       } else {
         state = { phase: "config-error", reason: msg.reason };
       }
       render();
       break;
 
-    case "autoExportStatus":
-      autoExportStatus = msg.status;
-      render();
-      break;
-
-    case "skillLoaded":
-      activeSkillName = msg.name;
-      activeSkillDescription = msg.description;
-      skillError = null;
-      if (skillErrorTimeout) {
-        clearTimeout(skillErrorTimeout);
-        skillErrorTimeout = null;
-      }
-      if (msg.activation) {
-        const greetingMsg: PortConversationMessage = {
-          role: "assistant",
-          content: msg.activation,
-          timestamp: new Date().toISOString(),
-        };
-        setReadyPhase([greetingMsg]);
-      } else {
-        setReadyPhase();
-      }
-      render();
-      break;
-
-    case "skillCleared":
-      activeSkillName = null;
-      activeSkillDescription = null;
-      render();
-      break;
-
-    case "skillError":
-      skillError = msg.errors.join(", ");
-      if (skillErrorTimeout) {
-        clearTimeout(skillErrorTimeout);
-      }
-      skillErrorTimeout = setTimeout(() => {
-        skillError = null;
-        skillErrorTimeout = null;
-        render();
-      }, 5000);
-      render();
-      break;
-
-    case "libraryState":
-      librarySnapshot = msg.library;
-      render();
-      break;
-
-    case "activationChanged":
-      if (msg.names.length > 0) {
-        activeSkillName = msg.names.join(" + ");
-        activeSkillDescription = msg.active.kind === "persona" ? `Persona with ${msg.names.length} skills` : null;
-      } else {
-        activeSkillName = null;
-        activeSkillDescription = null;
-      }
-      // Update library snapshot active state
-      if (librarySnapshot) {
-        librarySnapshot = { ...librarySnapshot, active: msg.active };
-      }
-      setReadyPhase();
-      render();
-      break;
   }
 }
 
@@ -475,10 +471,11 @@ function render(): void {
     case "no-page":
       content.appendChild(renderNoPage());
       break;
-    case "persona-chat":
-      content.appendChild(renderPersonaChat());
+    case "free-chat":
+      content.appendChild(renderFreeChat());
       break;
     case "summarizing":
+      content.append(...renderTruncationNotices(state));
       content.appendChild(renderSummarizing());
       break;
     case "ready":
@@ -486,6 +483,7 @@ function render(): void {
         content.appendChild(renderReadyNoSummary());
       } else {
         content.appendChild(renderContextSection());
+        content.append(...renderTruncationNotices(state));
         content.appendChild(renderMessages(state.messages));
         if (pageWordCount !== null && pageWordCount > 0) {
           const mins = Math.max(1, Math.ceil(pageWordCount / 200));
@@ -505,6 +503,7 @@ function render(): void {
       }
       break;
     case "streaming":
+      content.append(...renderTruncationNotices(state));
       content.appendChild(renderMessages(state.messages, state.partial));
       content.appendChild(renderStreamingControls());
       break;
@@ -519,7 +518,7 @@ function render(): void {
   container.appendChild(content);
 
   // Footer with export controls (visible when content is available)
-  if (state.phase === "ready" || state.phase === "streaming" || state.phase === "summarizing" || state.phase === "persona-chat" || (state.phase === "config-error" && currentTabId != null)) {
+  if (state.phase === "ready" || state.phase === "streaming" || state.phase === "summarizing" || state.phase === "free-chat" || (state.phase === "config-error" && currentTabId != null)) {
     container.appendChild(renderFooter());
   }
 
@@ -535,27 +534,7 @@ function render(): void {
 function renderHeader(): HTMLElement {
   const header = el("header", "sidebar-header");
 
-  // Bot avatar (circular, displayed before title when set)
-  if (botAvatarDataUri) {
-    const avatar = document.createElement("img") as HTMLImageElement;
-    avatar.className = "bot-avatar";
-    avatar.src = botAvatarDataUri;
-    avatar.alt = "Bot avatar";
-    header.appendChild(avatar);
-  }
-
-  const title = el("h1", "sidebar-title");
-  if (activeSkillName) {
-    title.className = "sidebar-title skill-indicator";
-    title.textContent = activeSkillName;
-    if (activeSkillDescription) {
-      title.title = activeSkillDescription;
-    }
-  } else {
-    title.textContent = "Distill";
-  }
-  header.appendChild(title);
-
+  // No in-page title: Firefox already shows the sidebar's name in its own title bar.
   const headerControls = el("div", "header-controls");
 
   // Reset button — visible when we have content loaded
@@ -574,12 +553,12 @@ function renderHeader(): HTMLElement {
     headerControls.appendChild(resetBtn);
   }
 
-  // New chat button — visible in page-context states; drops page context and enters persona-chat
+  // New chat button — visible in page-context states; drops page context and enters free-chat
   if (state.phase === "ready" || state.phase === "streaming" || state.phase === "summarizing") {
     const newChatBtn = el("button", "btn-new-chat") as HTMLButtonElement;
     newChatBtn.textContent = "✦ New chat";
-    newChatBtn.title = "New chat — clear page context and chat with persona";
-    newChatBtn.setAttribute("aria-label", "New chat — clear page context and chat with persona");
+    newChatBtn.title = "New chat — clear page context and start a free chat";
+    newChatBtn.setAttribute("aria-label", "New chat — clear page context and start a free chat");
     newChatBtn.addEventListener("click", () => {
       if (currentTabId == null) return;
       resetLocalNav();
@@ -621,14 +600,14 @@ function renderHeader(): HTMLElement {
     helpDropdown.appendChild(settingsLink);
 
     const issuesLink = el("a", "help-menu-link help-menu-external") as HTMLAnchorElement;
-    issuesLink.href = "https://github.com/dstaulcu/distill/issues";
+    issuesLink.href = "https://github.com/dstaulcu/page-distill/issues";
     issuesLink.target = "_blank";
     issuesLink.rel = "noopener";
     issuesLink.textContent = "Report an issue";
     helpDropdown.appendChild(issuesLink);
 
     const releasesLink = el("a", "help-menu-link help-menu-external") as HTMLAnchorElement;
-    releasesLink.href = "https://github.com/dstaulcu/distill/releases";
+    releasesLink.href = "https://github.com/dstaulcu/page-distill/releases";
     releasesLink.target = "_blank";
     releasesLink.rel = "noopener";
     releasesLink.textContent = "Releases";
@@ -670,9 +649,9 @@ function renderNoPage(): HTMLElement {
   return wrapper;
 }
 
-function renderPersonaChat(): HTMLElement {
-  const wrapper = el("div", "state-persona-chat");
-  const personaState = state as { phase: "persona-chat"; messages: ReadonlyArray<PortConversationMessage> };
+function renderFreeChat(): HTMLElement {
+  const wrapper = el("div", "state-free-chat");
+  const freeChatState = state as Extract<SidebarState, { phase: "free-chat" }>;
 
   // Context section (prominent — it's the main action here)
   wrapper.appendChild(renderContextSection());
@@ -682,30 +661,31 @@ function renderPersonaChat(): HTMLElement {
   }
 
   // Chat messages (if any)
-  if (personaState.messages.length > 0) {
-    wrapper.appendChild(renderMessages(personaState.messages));
+  if (freeChatState.messages.length > 0) {
+    wrapper.append(...renderTruncationNotices(freeChatState));
+    wrapper.appendChild(renderMessages(freeChatState.messages));
   } else if (contextTabs.length > 0) {
     // Context has been added but no conversation started yet — offer the
     // same Summarize entry point the "ready" phase gives for a single page,
     // rather than leaving only open-ended chat as the sole way in.
-    wrapper.appendChild(renderPersonaSummarizeAction());
+    wrapper.appendChild(renderFreeChatSummarizeAction());
   } else {
     // Empty state hint
-    const hint = el("p", "persona-chat-hint");
-    hint.textContent = "Add page context above, select a persona, then start chatting.";
+    const hint = el("p", "free-chat-hint");
+    hint.textContent = "Add page context above, then start chatting.";
     wrapper.appendChild(hint);
   }
 
-  // Chat input — always visible in persona-chat mode
+  // Chat input — always visible in free-chat mode
   wrapper.appendChild(renderInputArea());
 
   return wrapper;
 }
 
-function renderPersonaSummarizeAction(): HTMLElement {
-  const wrapper = el("div", "persona-summarize-action");
+function renderFreeChatSummarizeAction(): HTMLElement {
+  const wrapper = el("div", "free-chat-summarize-action");
 
-  const hint = el("p", "persona-chat-hint");
+  const hint = el("p", "free-chat-hint");
   hint.textContent = "Context added — summarize it, or start chatting below.";
   wrapper.appendChild(hint);
 
@@ -713,7 +693,7 @@ function renderPersonaSummarizeAction(): HTMLElement {
   summarizeBtn.textContent = "Summarize";
   summarizeBtn.addEventListener("click", () => {
     sendToController({ type: "summarize" });
-    state = { phase: "summarizing", title: "", partialContent: "", returnPhase: "persona-chat" };
+    state = { phase: "summarizing", title: "", partialContent: "", returnPhase: "free-chat", priorMessages: [] };
     render();
   });
   wrapper.appendChild(summarizeBtn);
@@ -751,7 +731,7 @@ function renderReadyNoSummary(): HTMLElement {
   summarizeBtn.textContent = "Summarize";
   summarizeBtn.addEventListener("click", () => {
     sendToController({ type: "summarize" });
-    state = { phase: "summarizing", title: "", partialContent: "", returnPhase: "ready" };
+    state = { phase: "summarizing", title: "", partialContent: "", returnPhase: "ready", priorMessages: [] };
     render();
   });
   actions.appendChild(summarizeBtn);
@@ -929,6 +909,33 @@ function renderMessages(messages: ReadonlyArray<PortConversationMessage>, partia
   return wrapper;
 }
 
+/** The CF-3.8 / CF-3.9 notes a finished (or in-flight) request carries, in display order. */
+function renderTruncationNotices(
+  flags: { readonly historyTruncated?: boolean; readonly contextTruncated?: boolean },
+): HTMLElement[] {
+  const notices: HTMLElement[] = [];
+  if (flags.historyTruncated) notices.push(renderTruncationNotice());
+  if (flags.contextTruncated) notices.push(renderContextTruncationNotice());
+  return notices;
+}
+
+function renderTruncationNotice(): HTMLElement {
+  // CF-3.8: earlier conversation turns were dropped to fit the model's
+  // configured context window — surfaced so the trim is never silent.
+  const wrapper = el("div", "truncation-notice");
+  wrapper.textContent = "Earlier messages were trimmed to fit the model's context window.";
+  return wrapper;
+}
+
+function renderContextTruncationNotice(): HTMLElement {
+  // CF-3.9: the page content (or added tabs) was longer than the model's
+  // configured context window, so each was cut short — surfaced so it is
+  // never a silent truncation.
+  const wrapper = el("div", "truncation-notice");
+  wrapper.textContent = "Page content was shortened to fit the model's context window.";
+  return wrapper;
+}
+
 function renderLowConfidenceHint(): HTMLElement {
   const wrapper = el("div", "low-confidence-hint");
   const link = el("a", "picker-link") as HTMLAnchorElement;
@@ -996,6 +1003,22 @@ function renderInputArea(): HTMLElement {
 
   const controls = el("div", "input-controls");
   controls.appendChild(sendBtn);
+
+  // Context may have changed since the last summary (e.g. a tab was added):
+  // let the user summarize again. The new summary is appended to the chat.
+  if ((state.phase === "ready" || state.phase === "free-chat") && state.messages.length > 0 && contextTabs.length > 0) {
+    const phase = state.phase;
+    const messages = state.messages;
+    const resummarizeBtn = el("button", "btn btn-resummarize") as HTMLButtonElement;
+    resummarizeBtn.textContent = "↻ Update summary";
+    resummarizeBtn.title = "Summarize the current context tabs again";
+    resummarizeBtn.addEventListener("click", () => {
+      sendToController({ type: "summarize" });
+      state = { phase: "summarizing", title: "", partialContent: "", returnPhase: phase, priorMessages: messages };
+      render();
+    });
+    controls.appendChild(resummarizeBtn);
+  }
   wrapper.appendChild(controls);
 
   return wrapper;
@@ -1022,7 +1045,7 @@ function renderError(): HTMLElement {
     canRetry: boolean;
     showPicker: boolean;
     messages: ReadonlyArray<PortConversationMessage>;
-    returnPhase: "ready" | "persona-chat";
+    returnPhase: "ready" | "free-chat";
   };
 
   // The conversation stays visible; the error renders alongside it (CF-3.3)
@@ -1102,264 +1125,60 @@ function renderConfigError(): HTMLElement {
   return wrapper;
 }
 
-function renderSkillSection(): HTMLElement {
-  const section = el("div", "skill-section");
-
-  // Library picker (select)
-  if (librarySnapshot && (librarySnapshot.skills.length > 0 || librarySnapshot.personas.length > 0)) {
-    const picker = document.createElement("select") as HTMLSelectElement;
-    picker.className = "skill-picker";
-    picker.setAttribute("aria-label", "Active skill or persona");
-
-    // None option
-    const noneOpt = document.createElement("option");
-    noneOpt.value = "none";
-    noneOpt.textContent = "— None —";
-    if (librarySnapshot.active.kind === "none") noneOpt.selected = true;
-    picker.appendChild(noneOpt);
-
-    // Skills optgroup
-    if (librarySnapshot.skills.length > 0) {
-      const skillGroup = document.createElement("optgroup");
-      skillGroup.label = "Skills";
-      for (const s of librarySnapshot.skills) {
-        const opt = document.createElement("option");
-        opt.value = `skill:${s.id}`;
-        opt.textContent = s.name;
-        if (librarySnapshot.active.kind === "skill" && librarySnapshot.active.skillId === s.id) opt.selected = true;
-        skillGroup.appendChild(opt);
-      }
-      picker.appendChild(skillGroup);
-    }
-
-    // Personas optgroup
-    if (librarySnapshot.personas.length > 0) {
-      const personaGroup = document.createElement("optgroup");
-      personaGroup.label = "Personas";
-      for (const p of librarySnapshot.personas) {
-        const opt = document.createElement("option");
-        opt.value = `persona:${p.id}`;
-        opt.textContent = `${p.name} (${p.skillNames.length} skills)`;
-        if (librarySnapshot.active.kind === "persona" && librarySnapshot.active.personaId === p.id) opt.selected = true;
-        personaGroup.appendChild(opt);
-      }
-      picker.appendChild(personaGroup);
-    }
-
-    picker.addEventListener("change", () => {
-      const val = picker.value;
-      if (val === "none") {
-        sendToController({ type: "deactivate" });
-      } else if (val.startsWith("skill:")) {
-        sendToController({ type: "activateSkill", skillId: val.slice(6) });
-      } else if (val.startsWith("persona:")) {
-        sendToController({ type: "activatePersona", personaId: val.slice(8) });
-      }
-    });
-
-    section.appendChild(picker);
-  }
-
-  // Upload controls
-  const controls = el("div", "skill-controls");
-
-  const fileInput = document.createElement("input") as HTMLInputElement;
-  fileInput.type = "file";
-  fileInput.accept = ".md";
-  fileInput.style.display = "none";
-  fileInput.addEventListener("change", () => {
-    if (fileInput.files && fileInput.files.length > 0) {
-      handleSkillFile(fileInput.files[0]);
-      fileInput.value = "";
-    }
-  });
-
-  const chooseBtn = el("button", "btn-choose-skill") as HTMLButtonElement;
-  chooseBtn.textContent = "Add Skill";
-  chooseBtn.addEventListener("click", () => {
-    fileInput.click();
-  });
-
-  controls.appendChild(fileInput);
-  controls.appendChild(chooseBtn);
-
-  if (activeSkillName) {
-    const clearBtn = el("button", "btn-clear-skill") as HTMLButtonElement;
-    clearBtn.textContent = "Clear";
-    clearBtn.addEventListener("click", () => {
-      sendToController({ type: "deactivate" });
-    });
-    controls.appendChild(clearBtn);
-  }
-
-  section.appendChild(controls);
-
-  // Error display
-  if (skillError) {
-    const errorEl = el("div", "skill-error");
-    errorEl.textContent = skillError;
-    section.appendChild(errorEl);
-  }
-
-  // ─── Bot Avatar Controls ───────────────────────────────────────────────────
-  const avatarControls = el("div", "avatar-controls");
-
-  const avatarFileInput = document.createElement("input") as HTMLInputElement;
-  avatarFileInput.type = "file";
-  avatarFileInput.accept = "image/*";
-  avatarFileInput.style.display = "none";
-  avatarFileInput.addEventListener("change", () => {
-    if (avatarFileInput.files && avatarFileInput.files.length > 0) {
-      handleAvatarFile(avatarFileInput.files[0]);
-      avatarFileInput.value = "";
-    }
-  });
-
-  const chooseAvatarBtn = el("button", "btn-choose-avatar") as HTMLButtonElement;
-  chooseAvatarBtn.textContent = "Choose Bot Avatar";
-  chooseAvatarBtn.addEventListener("click", () => {
-    avatarFileInput.click();
-  });
-
-  avatarControls.appendChild(avatarFileInput);
-  avatarControls.appendChild(chooseAvatarBtn);
-
-  // Remove avatar button (only when avatar is set)
-  if (botAvatarDataUri) {
-    const removeAvatarBtn = el("button", "btn-remove-avatar") as HTMLButtonElement;
-    removeAvatarBtn.textContent = "Remove";
-    removeAvatarBtn.addEventListener("click", () => {
-      botAvatarDataUri = null;
-      browser.storage.local.remove("distill_bot_avatar");
-      render();
-    });
-    avatarControls.appendChild(removeAvatarBtn);
-  }
-
-  section.appendChild(avatarControls);
-
-  // Avatar error display
-  if (avatarError) {
-    const avatarErrorEl = el("div", "avatar-error");
-    avatarErrorEl.textContent = avatarError;
-    section.appendChild(avatarErrorEl);
-  }
-
-  return section;
-}
-
-const SKILL_MAX_SIZE = 512 * 1024; // 512 KB
-
-function handleSkillFile(file: File): void {
-  // Validate extension
-  if (!file.name.endsWith(".md")) {
-    skillError = "Only .md files are accepted";
-    render();
-    return;
-  }
-
-  // Validate size
-  if (file.size > SKILL_MAX_SIZE) {
-    skillError = "Skill file too large (max 512 KB)";
-    render();
-    return;
-  }
-
-  const reader = new FileReader();
-  reader.onload = () => {
-    const content = reader.result as string;
-    skillError = null;
-    sendToController({ type: "loadSkill", raw: content });
-  };
-  reader.onerror = () => {
-    skillError = "Failed to read file";
-    render();
-  };
-  reader.readAsText(file);
-}
-
-const AVATAR_MAX_SIZE = 1024 * 1024; // 1 MB
-
-function handleAvatarFile(file: File): void {
-  // Validate type
-  if (!file.type.startsWith("image/")) {
-    avatarError = "Avatar must be an image file";
-    render();
-    return;
-  }
-
-  // Validate size
-  if (file.size > AVATAR_MAX_SIZE) {
-    avatarError = "Avatar image too large (max 1 MB)";
-    render();
-    return;
-  }
-
-  const reader = new FileReader();
-  reader.onload = () => {
-    const dataUri = reader.result as string;
-    avatarError = null;
-    botAvatarDataUri = dataUri;
-    browser.storage.local.set({ distill_bot_avatar: dataUri });
-    render();
-  };
-  reader.onerror = () => {
-    avatarError = "Failed to read image file";
-    render();
-  };
-  reader.readAsDataURL(file);
-}
-
 function renderFooter(): HTMLElement {
   const footer = el("footer", "sidebar-footer");
 
-  // Export controls — only shown when there's page context (not in pure persona mode with no tabs)
-  if (state.phase !== "persona-chat" || contextTabs.length > 0) {
+  // Export controls — only shown when there's page context (not in pure free-chat mode with no tabs)
+  if (state.phase !== "free-chat" || contextTabs.length > 0) {
     const exportSection = el("div", "export-section");
 
     const exportCheckboxes = el("div", "export-checkboxes");
 
-    // Include Summary checkbox
-    const summaryLabel = el("label", "export-checkbox-label");
-    const summaryCheckbox = document.createElement("input") as HTMLInputElement;
-    summaryCheckbox.type = "checkbox";
-    summaryCheckbox.className = "export-checkbox";
-    summaryCheckbox.checked = true;
-    summaryCheckbox.setAttribute("aria-label", "Include AI summary in export");
-    const summaryText = document.createTextNode(" Summary");
-    summaryLabel.appendChild(summaryCheckbox);
-    summaryLabel.appendChild(summaryText);
-    exportCheckboxes.appendChild(summaryLabel);
-
-    // Include Q&A checkbox
-    const qaLabel = el("label", "export-checkbox-label");
-    const qaCheckbox = document.createElement("input") as HTMLInputElement;
-    qaCheckbox.type = "checkbox";
-    qaCheckbox.className = "export-checkbox";
-    qaCheckbox.checked = false;
-    qaCheckbox.setAttribute("aria-label", "Include Q&A in export");
-    const qaText = document.createTextNode(" Q&A");
-    qaLabel.appendChild(qaCheckbox);
-    qaLabel.appendChild(qaText);
-    exportCheckboxes.appendChild(qaLabel);
+    // Which sections go into the export. Summary is on by default; page content
+    // and the follow-up Q&A are opt-in. Kept at module level so the choices
+    // survive the footer being re-rendered.
+    const exportBtn = el("button", "btn btn-export") as HTMLButtonElement;
+    const syncExportButton = (): void => {
+      exportBtn.disabled = !(exportOptions.summary || exportOptions.content || exportOptions.qa);
+    };
+    const addExportCheckbox = (key: keyof typeof exportOptions, text: string, ariaLabel: string): void => {
+      const label = el("label", "export-checkbox-label");
+      const checkbox = document.createElement("input") as HTMLInputElement;
+      checkbox.type = "checkbox";
+      checkbox.className = "export-checkbox";
+      checkbox.checked = exportOptions[key];
+      checkbox.setAttribute("aria-label", ariaLabel);
+      checkbox.addEventListener("change", () => {
+        exportOptions[key] = checkbox.checked;
+        syncExportButton();
+      });
+      label.appendChild(checkbox);
+      label.appendChild(document.createTextNode(` ${text}`));
+      exportCheckboxes.appendChild(label);
+    };
+    addExportCheckbox("summary", "Summary", "Include AI summary in export");
+    addExportCheckbox("content", "Content", "Include page content in export");
+    addExportCheckbox("qa", "Q&A", "Include follow-up Q&A in export");
 
     exportSection.appendChild(exportCheckboxes);
 
     // Export button
-    const exportBtn = el("button", "btn btn-export") as HTMLButtonElement;
     exportBtn.textContent = "Export";
+    syncExportButton();
     exportBtn.addEventListener("click", async () => {
       if (currentTabId == null) return;
       exportBtn.disabled = true;
       exportBtn.textContent = "Exporting...";
       try {
         const destination = await getDefaultExportDestination();
+        logger.debug("Export requested", destination.kind);
         const response = await browser.runtime.sendMessage({
           kind: "exportRequested",
           payload: {
             tabId: currentTabId,
-            includeSummary: summaryCheckbox.checked,
-            includeQA: qaCheckbox.checked,
+            includeSummary: exportOptions.summary,
+            includeContent: exportOptions.content,
+            includeQA: exportOptions.qa,
             destinations: [destination],
           },
         });
@@ -1367,81 +1186,31 @@ function renderFooter(): HTMLElement {
           const result = response as { ok?: boolean; payload?: { ok?: boolean; filename?: string; detail?: string } };
           const payload = result.payload ?? result;
           if (payload.ok) {
+            logger.debug("Export succeeded", (payload as { filename?: string }).filename);
             exportBtn.textContent = "✓ Exported";
             setTimeout(() => { exportBtn.textContent = "Export"; }, 2000);
           } else {
+            logger.warn("Export failed", (payload as { detail?: string }).detail);
             exportBtn.textContent = "✗ Failed";
             setTimeout(() => { exportBtn.textContent = "Export"; }, 3000);
           }
         } else {
+          logger.warn("Export failed: no response from background");
           exportBtn.textContent = "✗ No response";
           setTimeout(() => { exportBtn.textContent = "Export"; }, 3000);
         }
       } catch (err) {
+        logger.warn("Export failed with an error", err instanceof Error ? err.message : String(err));
         exportBtn.textContent = "✗ Error";
         setTimeout(() => { exportBtn.textContent = "Export"; }, 3000);
       } finally {
-        exportBtn.disabled = false;
+        syncExportButton();
       }
     });
     exportSection.appendChild(exportBtn);
 
     footer.appendChild(exportSection);
-
-    // Auto-export toggle
-    const autoExportSection = el("div", "auto-export-section");
-
-    const autoExportLabel = el("label", "auto-export-label");
-    const autoExportToggle = document.createElement("input") as HTMLInputElement;
-    autoExportToggle.type = "checkbox";
-    autoExportToggle.className = "auto-export-toggle";
-    autoExportToggle.checked = autoExportStatus !== null;
-    autoExportToggle.setAttribute("aria-label", "Auto-export for current site");
-    const autoExportText = document.createTextNode(" Auto-export");
-    autoExportLabel.appendChild(autoExportToggle);
-    autoExportLabel.appendChild(autoExportText);
-
-    autoExportToggle.addEventListener("change", () => {
-      if (autoExportToggle.checked) {
-        const origin = tracker?.getActiveTabUrl() ? new URL(tracker.getActiveTabUrl()!).origin : "";
-        if (origin && currentTabId != null) {
-          sendToController({
-            type: "autoExportEnable",
-            config: {
-              origin,
-              intervalMinutes: 15,
-              destination: { kind: "download" },
-              mode: "content-only",
-              skipIfUnchanged: true,
-            },
-          });
-        }
-      } else {
-        const origin = tracker?.getActiveTabUrl() ? new URL(tracker.getActiveTabUrl()!).origin : "";
-        if (origin) {
-          sendToController({ type: "autoExportDisable", origin });
-        }
-      }
-    });
-
-    autoExportSection.appendChild(autoExportLabel);
-
-    // Auto-export status indicator
-    if (autoExportStatus) {
-      const statusEl = el("div", "auto-export-status");
-      const lastCapture = autoExportStatus.lastCaptureTime
-        ? `Last: ${formatRelativeTime(autoExportStatus.lastCaptureTime)}`
-        : "No captures yet";
-      const nextFire = `Next: ${formatRelativeTime(new Date(autoExportStatus.nextFireTime).toISOString())}`;
-      statusEl.textContent = `${lastCapture} · ${nextFire}`;
-      autoExportSection.appendChild(statusEl);
-    }
-
-    footer.appendChild(autoExportSection);
   }
-
-  // Skill upload section (always shown)
-  footer.appendChild(renderSkillSection());
 
   return footer;
 }
@@ -1469,6 +1238,29 @@ async function getDefaultExportDestination(): Promise<{ kind: "download" } | { k
   }
 }
 
+/**
+ * Reads the debug-logging flag (SF-8) at startup. Same read order as
+ * getDefaultExportDestination; defaults to disabled on any failure.
+ */
+async function refreshDebugLoggingFlag(): Promise<void> {
+  try {
+    interface StoredDebugSettings {
+      debugLogging?: boolean;
+    }
+    const stored = await browser.storage.sync.get("settings");
+    let settings = stored?.settings as StoredDebugSettings | undefined;
+    if (!settings) {
+      const local = await browser.storage.local.get("settings");
+      settings = local?.settings as StoredDebugSettings | undefined;
+    }
+    if (typeof settings?.debugLogging === "boolean") {
+      debugLoggingEnabled = settings.debugLogging;
+    }
+  } catch {
+    // Storage unavailable — default to disabled.
+  }
+}
+
 // ─── Actions ─────────────────────────────────────────────────────────────────
 
 function submitMessage(text: string): void {
@@ -1484,8 +1276,8 @@ function submitMessage(text: string): void {
 
   if (state.phase === "ready") {
     state = { phase: "streaming", messages: [...state.messages, userMsg], partial: "", returnPhase: "ready" };
-  } else if (state.phase === "persona-chat") {
-    state = { phase: "streaming", messages: [...state.messages, userMsg], partial: "", returnPhase: "persona-chat" };
+  } else if (state.phase === "free-chat") {
+    state = { phase: "streaming", messages: [...state.messages, userMsg], partial: "", returnPhase: "free-chat" };
   }
 
   sendToController({ type: "sendMessage", text: trimmed });
@@ -1509,11 +1301,11 @@ function resetLocalNav(): void {
   state = { phase: "loading" };
 }
 
-// Sets state to "ready" or keeps "persona-chat" (preserving the phase) and
+// Sets state to "ready" or keeps "free-chat" (preserving the phase) and
 // replaces messages. Eliminates the repeated if/else branching across handlers.
 function setReadyPhase(msgs: ReadonlyArray<PortConversationMessage> = []): void {
-  state = state.phase === "persona-chat"
-    ? { phase: "persona-chat", messages: msgs }
+  state = state.phase === "free-chat"
+    ? { phase: "free-chat", messages: msgs }
     : { phase: "ready", messages: msgs };
 }
 
@@ -1576,17 +1368,11 @@ async function init(): Promise<void> {
   render();
 
   // Restore persisted UI settings
-  const avatarResult = await browser.storage.local.get("distill_bot_avatar");
-  if (avatarResult.distill_bot_avatar && typeof avatarResult.distill_bot_avatar === "string") {
-    botAvatarDataUri = avatarResult.distill_bot_avatar;
-  }
+  await refreshDebugLoggingFlag();
   render();
 
   // Connect to background
   connectPort();
-
-  // Request library state for picker
-  sendToController({ type: "getLibrary" });
 
   // Initialize active tab tracker
   try {
@@ -1600,16 +1386,10 @@ async function init(): Promise<void> {
       currentTabId = tabId;
       currentTabUrl = tracker.getActiveTabUrl() ?? undefined;
       sendToController({ type: "init", tabId, url: currentTabUrl });
-      // Also request auto-export status
-      sendToController({ type: "autoExportStatusRequest", tabId });
     }
 
     // Listen for tab changes
     tracker.onActiveTabChanged((newTabId: number, newUrl: string) => {
-      // Auto-export status reflects whichever tab is physically in view,
-      // independent of whether the chat session itself resets below.
-      sendToController({ type: "autoExportStatusRequest", tabId: newTabId });
-
       // If the newly active tab is already part of this session's multi-tab
       // context (SF-1 — the primary tab or one added via "+"), treat the
       // switch as a no-op for the chat session: peeking at a citation tab

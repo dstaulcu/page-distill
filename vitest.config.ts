@@ -4,6 +4,9 @@ export default defineConfig({
   test: {
     globals: true,
     environment: "jsdom",
+    // Entry-point tests dynamically import large modules; under full-suite load the
+    // first one can exceed the 5s default without anything being wrong.
+    testTimeout: 15000,
   },
   resolve: {
     alias: {

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Distill",
-  "version": "4.0.0",
+  "version": "4.0.3",
   "description": "Extract, summarize, and export web page content as Markdown.",
   "browser_specific_settings": {
     "gecko": {
@@ -16,8 +16,7 @@
   "permissions": [
     "storage",
     "activeTab",
-    "downloads",
-    "alarms"
+    "downloads"
   ],
   "host_permissions": [
     "<all_urls>"

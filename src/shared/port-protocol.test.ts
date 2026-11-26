@@ -11,11 +11,6 @@ describe("port-protocol", () => {
       expect(isSidebarToControllerMessage({ type: "sendMessage", text: "hi" })).toBe(true);
       expect(isSidebarToControllerMessage({ type: "abort" })).toBe(true);
       expect(isSidebarToControllerMessage({ type: "retry" })).toBe(true);
-      expect(isSidebarToControllerMessage({ type: "autoExportEnable", config: {} })).toBe(true);
-      expect(isSidebarToControllerMessage({ type: "autoExportDisable", origin: "https://x.com" })).toBe(true);
-      expect(isSidebarToControllerMessage({ type: "autoExportStatusRequest", tabId: 5 })).toBe(true);
-      expect(isSidebarToControllerMessage({ type: "loadSkill", raw: "# Skill" })).toBe(true);
-      expect(isSidebarToControllerMessage({ type: "clearSkill" })).toBe(true);
     });
 
     it("returns false for invalid values", () => {
@@ -35,10 +30,6 @@ describe("port-protocol", () => {
       expect(isControllerToSidebarMessage({ type: "streamEnd", fullContent: "done" })).toBe(true);
       expect(isControllerToSidebarMessage({ type: "streamStart" })).toBe(true);
       expect(isControllerToSidebarMessage({ type: "configError", reason: "not-configured" })).toBe(true);
-      expect(isControllerToSidebarMessage({ type: "autoExportStatus", status: null })).toBe(true);
-      expect(isControllerToSidebarMessage({ type: "skillLoaded", name: "Dave", description: "A persona", activation: "Hello!" })).toBe(true);
-      expect(isControllerToSidebarMessage({ type: "skillCleared" })).toBe(true);
-      expect(isControllerToSidebarMessage({ type: "skillError", errors: ["Missing name"] })).toBe(true);
     });
 
     it("returns false for invalid values", () => {
@@ -48,5 +39,37 @@ describe("port-protocol", () => {
       expect(isControllerToSidebarMessage({ type: "init" })).toBe(false);
       expect(isControllerToSidebarMessage({ type: "unknownType" })).toBe(false);
     });
+  });
+});
+
+describe("removed port messages (auto-export, personas, skills)", () => {
+  it("no longer accepts auto-export or persona messages", () => {
+    expect(isSidebarToControllerMessage({ type: "autoExportEnable", config: {} })).toBe(false);
+    expect(isSidebarToControllerMessage({ type: "autoExportDisable", origin: "https://x.com" })).toBe(false);
+    expect(isSidebarToControllerMessage({ type: "autoExportStatusRequest", tabId: 5 })).toBe(false);
+    expect(isSidebarToControllerMessage({ type: "activatePersona", personaId: "p" })).toBe(false);
+    expect(isControllerToSidebarMessage({ type: "autoExportStatus", status: null })).toBe(false);
+    expect(isSidebarToControllerMessage({ type: "loadSkill", raw: "# Skill" })).toBe(false);
+    expect(isSidebarToControllerMessage({ type: "clearSkill" })).toBe(false);
+    expect(isControllerToSidebarMessage({ type: "skillLoaded", name: "Dave", description: "d", activation: null })).toBe(false);
+    expect(isControllerToSidebarMessage({ type: "personaModeReady" })).toBe(false);
+  });
+
+  it("no longer accepts any skill-library message", () => {
+    for (const msg of [{ type: "getLibrary" }, { type: "activateSkill", skillId: "s" }, { type: "deactivate" }]) {
+      expect(isSidebarToControllerMessage(msg)).toBe(false);
+    }
+    for (const msg of [
+      { type: "libraryState", library: { skills: [], active: { kind: "none" } } },
+      { type: "activationChanged", active: { kind: "none" }, names: [] },
+      { type: "skillError", errors: ["x"] },
+      { type: "skillCleared" },
+    ]) {
+      expect(isControllerToSidebarMessage(msg)).toBe(false);
+    }
+  });
+
+  it("accepts the renamed free-chat ready message", () => {
+    expect(isControllerToSidebarMessage({ type: "freeChatReady" })).toBe(true);
   });
 });

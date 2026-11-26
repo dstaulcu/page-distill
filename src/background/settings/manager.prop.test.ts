@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import fc from "fast-check";
 import { validateSettings } from "./manager";
 import { DEFAULT_SETTINGS } from "./defaults";
-import type { Settings, AutoExportConfig, SitePattern } from "@shared/types";
+import type { Settings, SitePattern } from "@shared/types";
 
 // ---------------------------------------------------------------------------
 // Property 12: Settings validation rejects invalid values
@@ -86,48 +86,6 @@ describe("Property 12: Settings validation rejects invalid values", () => {
     );
   });
 
-  it("rejects non-integer or out-of-range [1,120] intervalMinutes", () => {
-    /**
-     * **Validates: Requirements 8.7**
-     */
-    const invalidInterval = fc.oneof(
-      // Non-integer values (floats)
-      fc.double({ min: 0.01, max: 200, noNaN: true }).filter(
-        (n) => !Number.isInteger(n),
-      ),
-      // Below range
-      fc.integer({ min: -1000, max: 0 }),
-      // Above range
-      fc.integer({ min: 121, max: 10000 }),
-    );
-
-    fc.assert(
-      fc.property(invalidInterval, (interval) => {
-        const config: AutoExportConfig = {
-          origin: "https://example.com",
-          enabled: true,
-          intervalMinutes: interval,
-          destination: { kind: "download" },
-          mode: "content-only",
-          skipIfUnchanged: false,
-          createdAt: "2024-01-01T00:00:00Z",
-          updatedAt: "2024-01-01T00:00:00Z",
-        };
-        const settings: Settings = {
-          ...DEFAULT_SETTINGS,
-          autoExportConfigs: [config],
-        };
-        const errors = validateSettings(settings);
-        const intervalErrors = errors.filter((e) =>
-          e.field.includes("intervalMinutes"),
-        );
-        expect(intervalErrors.length).toBe(1);
-        expect(intervalErrors[0].message).toBeTruthy();
-      }),
-      { numRuns: 100 },
-    );
-  });
-
   it("accepts valid settings with no validation errors", () => {
     /**
      * **Validates: Requirements 8.7**
@@ -141,8 +99,6 @@ describe("Property 12: Settings validation rejects invalid values", () => {
       (s) => s.trim().length > 0,
     );
 
-    const validInterval = fc.integer({ min: 1, max: 120 });
-
     const validSitePatterns = fc.array(
       fc.record({
         id: fc.string({ minLength: 1 }),
@@ -153,34 +109,21 @@ describe("Property 12: Settings validation rejects invalid values", () => {
       { minLength: 0, maxLength: 50 },
     );
 
-    const validAutoExportConfigs = fc.array(
-      validInterval.map((interval) => ({
-        origin: "https://example.com",
-        enabled: true,
-        intervalMinutes: interval,
-        destination: { kind: "download" as const },
-        mode: "content-only" as const,
-        skipIfUnchanged: false,
-        createdAt: "2024-01-01T00:00:00Z",
-        updatedAt: "2024-01-01T00:00:00Z",
-      })),
-      { minLength: 0, maxLength: 5 },
-    );
-
     fc.assert(
       fc.property(
         validBaseUrl,
         validFilenamePattern,
         validSitePatterns,
-        validAutoExportConfigs,
-        (baseUrl, filenamePattern, sitePatterns, autoExportConfigs) => {
+        (baseUrl, filenamePattern, sitePatterns) => {
           const settings: Settings = {
             schemaVersion: 1,
             ai: {
+              provider: "ollama",
               baseUrl,
               modelId: "gpt-4",
               apiKeyRef: null,
               systemPrompt: "",
+              contextWindowTokens: 8192,
             },
             export: {
               filenamePattern,
@@ -188,7 +131,7 @@ describe("Property 12: Settings validation rejects invalid values", () => {
               frontmatterFields: ["title"],
             },
             sitePatterns,
-            autoExportConfigs,
+            debugLogging: false,
           };
           const errors = validateSettings(settings);
           expect(errors).toHaveLength(0);

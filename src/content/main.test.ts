@@ -252,13 +252,90 @@ describe("CF-1/CF-6 content/main message handler", () => {
       await loadModule();
       const msg = buildMessage("settingsChanged", {
         schemaVersion: 1,
-        ai: { baseUrl: "", modelId: "", apiKeyRef: null, systemPrompt: "" },
+        ai: { provider: "openai-compatible", baseUrl: "", modelId: "", apiKeyRef: null, systemPrompt: "", contextWindowTokens: 8192 },
         export: { filenamePattern: "", defaultDestination: { kind: "download" }, frontmatterFields: [] },
         sitePatterns: [],
-        autoExportConfigs: [],
+        debugLogging: false,
       });
       const result = registeredListener!(msg);
       expect(result).toBeUndefined();
+    });
+  });
+
+  describe("SF-8 logging", () => {
+    function settingsChangedMessage(debugLogging: boolean) {
+      return buildMessage("debugLoggingChanged", { enabled: debugLogging });
+    }
+
+    async function triggerExtraction() {
+      mockExtract.mockResolvedValue({
+        ok: true,
+        article: {
+          title: "Test", author: null, publicationDate: null,
+          sourceUrl: "https://example.com", siteName: "Example",
+          bodyMarkdown: "# Hello", bodyCharacterCount: 7,
+        },
+        confidence: "high",
+      });
+      const msg = buildMessage("extractRequested", { tabId: 1 });
+      await registeredListener!(msg);
+    }
+
+    it("produces no console output by default (debugLogging starts false)", async () => {
+      const debugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+      try {
+        await loadModule();
+        await triggerExtraction();
+        expect(debugSpy).not.toHaveBeenCalled();
+      } finally {
+        debugSpy.mockRestore();
+      }
+    });
+
+    it("starts logging once a settingsChanged broadcast reports debugLogging: true", async () => {
+      const debugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+      try {
+        await loadModule();
+        registeredListener!(settingsChangedMessage(true));
+        await triggerExtraction();
+        expect(debugSpy).toHaveBeenCalled();
+      } finally {
+        debugSpy.mockRestore();
+      }
+    });
+
+    it("a live broadcast wins over a slower in-flight storage read that returns the old value", async () => {
+      const debugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+      let resolveSync!: (v: unknown) => void;
+      const g = globalThis as unknown as { browser: Record<string, unknown> };
+      g.browser.storage = {
+        sync: { get: vi.fn(() => new Promise((r) => { resolveSync = r; })) },
+        local: { get: vi.fn(async () => ({})) },
+      };
+      try {
+        await loadModule();
+        registeredListener!(settingsChangedMessage(true));
+        resolveSync({ settings: { debugLogging: false } }); // stale value arrives late
+        for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, 0));
+        await triggerExtraction();
+        expect(debugSpy).toHaveBeenCalled();
+      } finally {
+        delete g.browser.storage;
+        debugSpy.mockRestore();
+      }
+    });
+
+    it("stops logging once a settingsChanged broadcast reports debugLogging: false", async () => {
+      const debugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+      try {
+        await loadModule();
+        registeredListener!(settingsChangedMessage(true));
+        registeredListener!(settingsChangedMessage(false));
+        await triggerExtraction();
+        expect(debugSpy).not.toHaveBeenCalled();
+      } finally {
+        debugSpy.mockRestore();
+      }
     });
   });
 });
