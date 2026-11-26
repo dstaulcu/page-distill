@@ -9,6 +9,7 @@
 import { isMessageOfKind, buildMessage } from "@shared/messages";
 import type { MessageOf, ExtractResultPayload, PickerResultPayload, SelectorPreviewResultPayload } from "@shared/messages";
 import { extract } from "./extractor/extract";
+import { pickContentElement } from "./extractor/candidates";
 import { createElementPicker } from "./element-picker";
 import { createLogger } from "@shared/logger";
 
@@ -103,8 +104,9 @@ async function handlePickerActivate(
 const SELECTOR_PREVIEW_MAX_CHARS = 500;
 
 /**
- * Live selector preview for the options page (CF-6.5): returns the first
- * matched element's text so users can see what a selector captures.
+ * Live selector preview for the options page (CF-6.5): returns the text of the
+ * element extraction would actually use for this selector (best-scoring match,
+ * see pickContentElement) so the preview matches real behavior.
  */
 function handleSelectorPreview(
   msg: MessageOf<"selectorPreview">,
@@ -113,7 +115,7 @@ function handleSelectorPreview(
 
   let payload: SelectorPreviewResultPayload;
   try {
-    const element = document.querySelector(selector);
+    const element = pickContentElement(document, selector);
     if (element) {
       const text = (element.textContent ?? "").trim().slice(0, SELECTOR_PREVIEW_MAX_CHARS);
       payload = { ok: true, text };

@@ -45,4 +45,12 @@ describe("CF-3.8 shortenLinkUrls", () => {
     const md = Array.from({ length: 20 }, (_, i) => `## Offer ${i}\n\nText.\n\n[Apply](${TRACKING}&i=${i})`).join("\n\n");
     expect(shortenLinkUrls(md).length).toBeLessThan(md.length * 0.5);
   });
+
+  it("keeps escaped parentheses in a long target intact instead of cutting at the first one", () => {
+    // Turndown writes parentheses inside a link target as \( and \)
+    const md = `[X](https://en.wikipedia.org/wiki/${"Some_very_long_title_".repeat(4)}\\(disambiguation\\)) after`;
+    const out = shortenLinkUrls(md);
+    // One closed link followed by the untouched text: no stray ")" left behind
+    expect(out).toMatch(/^\[X\]\(https:\/\/en\.wikipedia\.org\/[^)]*…\) after$/);
+  });
 });

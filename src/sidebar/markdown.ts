@@ -29,7 +29,7 @@ function renderTables(html: string): string {
   let i = 0;
   while (i < lines.length) {
     const line = lines[i];
-    if (line.includes("|") && i + 1 < lines.length && TABLE_SEPARATOR.test(lines[i + 1]) && lines[i + 1].includes("-")) {
+    if (line.includes("|") && i + 1 < lines.length && TABLE_SEPARATOR.test(lines[i + 1]) && lines[i + 1].includes("|")) {
       const header = splitRow(line);
       const rows: string[][] = [];
       let j = i + 2;
@@ -154,7 +154,14 @@ export function renderMarkdown(text: string): string {
   html = html.replace(/<(\/?)oli>/g, "<$1li>");
 
   // Restore protected code and links
-  html = html.replace(/\u0000(\d+)\u0000/g, (_m, n: string) => stash[Number(n)] ?? "");
+  // A stashed fragment can itself contain placeholders (a link label holding inline
+  // code), so restore until none remain. Fragments only ever reference EARLIER
+  // entries and input NULs were stripped, so this terminates and can't be forged.
+  for (let pass = 0; pass <= stash.length; pass++) {
+    const restored = html.replace(/\u0000(\d+)\u0000/g, (_m, n: string) => stash[Number(n)] ?? "");
+    if (restored === html) break;
+    html = restored;
+  }
 
   return html;
 }

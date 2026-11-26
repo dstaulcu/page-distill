@@ -19,6 +19,8 @@ function shortenUrl(url: string): string {
 
   let shortened = url;
   try {
+    // Turndown escapes parentheses as \( \); URL parsing would turn those into "/"
+    if (url.includes("\\")) throw new Error("escaped target");
     const parsed = new URL(url);
     shortened = parsed.origin + parsed.pathname;
   } catch {
@@ -30,7 +32,7 @@ function shortenUrl(url: string): string {
 
 export function shortenLinkUrls(markdown: string): string {
   return markdown.replace(
-    /(!?\[[^\]]*\])\(([^)\s]+)((?:\s+"[^"]*")?)\)/g,
+    /(!?\[[^\]]*\])\(((?:\\.|[^)\s\\])+)((?:\s+"[^"]*")?)\)/g,
     (_match, label: string, url: string, title: string) => `${label}(${shortenUrl(url)}${title})`,
   );
 }

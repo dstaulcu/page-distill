@@ -142,7 +142,8 @@ function readProvider(): AiProvider {
 function applyProviderUi(provider: AiProvider): void {
   const ui = getProviderUi(provider);
   $input("ai-base-url").placeholder = ui.baseUrlPlaceholder;
-  $input("ai-api-key").placeholder = ui.apiKeyPlaceholder;
+  // A saved key is shown as dots whatever the provider; otherwise the provider's hint
+  $input("ai-api-key").placeholder = state.settings?.ai.apiKeyRef ? "••••••••" : ui.apiKeyPlaceholder;
   $("ai-provider-hint").textContent = ui.description;
   $("group-ai-context-window").classList.toggle("hidden", !ui.usesContextWindow);
 }
@@ -163,7 +164,6 @@ function renderAiSection(): void {
 
   // API key is not displayed for security — only show placeholder if one is set
   $input("ai-api-key").value = "";
-  $input("ai-api-key").placeholder = state.settings.ai.apiKeyRef ? "••••••••" : "sk-...";
 
   // Auto-fetch models if base URL is configured
   if (state.settings.ai.baseUrl) {

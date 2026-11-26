@@ -359,6 +359,21 @@ describe("CF-6.5 selectorPreview handling", () => {
     });
   });
 
+  it("previews the element extraction would use: the substantial match, not the first teaser", async () => {
+    await loadModule();
+    document.body.innerHTML =
+      '<article id="teaser"><a href="/x">Read more</a></article>' +
+      `<article id="real"><p>${"The real article body with plenty of prose. ".repeat(10)}</p></article>`;
+
+    const response = (await registeredListener!(
+      buildMessage("selectorPreview", { selector: "article" }),
+    )) as MessageOf<"selectorPreviewResult">;
+
+    expect(response.payload.ok).toBe(true);
+    expect(response.payload.text).toContain("The real article body");
+    expect(response.payload.text).not.toContain("Read more");
+  });
+
   it("caps the preview text at 500 characters", async () => {
     await loadModule();
     document.body.innerHTML = `<div id="long">${"x".repeat(2000)}</div>`;

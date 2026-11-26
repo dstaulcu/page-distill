@@ -96,6 +96,21 @@ describe("CF-5.7 options page provider picker", () => {
     expect(contextGroup().classList.contains("hidden")).toBe(false);
   });
 
+  it("shows the provider's key hint on a fresh install, and dots (not the hint) once a key is saved", async () => {
+    await loadOptions();
+    expect(input("ai-api-key").placeholder).toBe("Optional — leave empty for a local server");
+
+    syncData = legacyStored("http://localhost:11434");
+    (syncData.settings as { ai: { apiKeyRef: string | null } }).ai.apiKeyRef = "ref-1";
+    await loadOptions();
+    expect(input("ai-api-key").placeholder).toBe("••••••••");
+
+    // Switching provider must not drop the saved-key indicator
+    select().value = "openai-compatible";
+    select().dispatchEvent(new Event("change"));
+    expect(input("ai-api-key").placeholder).toBe("••••••••");
+  });
+
   it("shows the provider inferred for settings saved before providers existed (hosted URL → OpenAI-compatible)", async () => {
     syncData = legacyStored("https://api.openai.com");
     await loadOptions();

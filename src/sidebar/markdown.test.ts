@@ -167,4 +167,16 @@ describe("markdown rendering — extended syntax", () => {
     expect(renderMarkdown("#### Findings")).not.toContain("<p><h5>");
     expect(renderMarkdown("###### Deep")).not.toContain("<p>");
   });
+
+  it("renders inline code inside a link label instead of leaking a placeholder", () => {
+    const html = renderMarkdown("[`npm install`](https://example.com/docs)");
+    expect(html).toContain('<a href="https://example.com/docs" target="_blank" rel="noopener"><code>npm install</code></a>');
+    expect(html).not.toContain("\u0000");
+  });
+
+  it("does not turn a line with a pipe followed by a horizontal rule into a table", () => {
+    const html = renderMarkdown("Use the a | b operator\n---\nnext");
+    expect(html).not.toContain("<table>");
+    expect(html).toContain("<hr>");
+  });
 });

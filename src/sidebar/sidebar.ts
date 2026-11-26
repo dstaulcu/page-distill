@@ -37,8 +37,8 @@ type SidebarState =
       // Conversation already on screen when an (updated) summary was requested;
       // the new summary is appended to it rather than replacing it.
       readonly priorMessages: ReadonlyArray<PortConversationMessage>;
-      // Set from streamStart's contextTruncated (CF-3.9) — a context tab
-      // was dropped from the summarize request to fit the context window.
+      // Set from streamStart's contextTruncated (CF-3.9) — page content was
+      // shortened in the summarize request to fit the context window.
       readonly contextTruncated?: boolean;
     }
   | {
@@ -58,8 +58,8 @@ type SidebarState =
       // small note so trimming the oldest turns to fit the model's context
       // window is never silent.
       readonly historyTruncated?: boolean;
-      // Set from streamStart's contextTruncated (CF-3.9) — a context tab
-      // was dropped from this request to fit the context window.
+      // Set from streamStart's contextTruncated (CF-3.9) — page content was
+      // shortened in this request to fit the context window.
       readonly contextTruncated?: boolean;
     }
   | {
@@ -333,7 +333,7 @@ function handleControllerMessage(msg: ControllerToSidebarMessage): void {
       logger.debug("Stream started", `historyTruncated=${!!msg.historyTruncated}`, `contextTruncated=${!!msg.contextTruncated}`);
       if (state.phase === "summarizing") {
         // Stay in summarizing, streaming will come via tokens — but still
-        // fold in whether a context tab was dropped for this request (CF-3.9).
+        // fold in whether page content was shortened for this request (CF-3.9).
         state = { ...state, contextTruncated: msg.contextTruncated };
       } else if (state.phase === "ready") {
         state = { phase: "streaming", messages: state.messages, partial: "", returnPhase: "ready", historyTruncated: msg.historyTruncated, contextTruncated: msg.contextTruncated };
@@ -1183,16 +1183,19 @@ function renderFooter(): HTMLElement {
           },
         });
         if (response && typeof response === "object") {
-          const result = response as { ok?: boolean; payload?: { ok?: boolean; filename?: string; detail?: string } };
+          const result = response as { ok?: boolean; payload?: { ok?: boolean; filename?: string; reason?: string; detail?: string } };
           const payload = result.payload ?? result;
           if (payload.ok) {
             logger.debug("Export succeeded", (payload as { filename?: string }).filename);
             exportBtn.textContent = "✓ Exported";
             setTimeout(() => { exportBtn.textContent = "Export"; }, 2000);
           } else {
-            logger.warn("Export failed", (payload as { detail?: string }).detail);
-            exportBtn.textContent = "✗ Failed";
-            setTimeout(() => { exportBtn.textContent = "Export"; }, 3000);
+            const failure = payload as { reason?: string; detail?: string };
+            logger.warn("Export failed", failure.detail);
+            // Say why when the user can act on it (e.g. exporting before summarizing)
+            exportBtn.textContent = failure.reason === "nothing-to-export" ? "✗ Nothing to export" : "✗ Failed";
+            exportBtn.title = failure.detail ?? "";
+            setTimeout(() => { exportBtn.textContent = "Export"; exportBtn.title = ""; }, 3000);
           }
         } else {
           logger.warn("Export failed: no response from background");

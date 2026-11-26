@@ -683,6 +683,20 @@ describe("CF-4.4 export destination and clipboard delivery", () => {
     expect(exportMsg.payload.destinations).toEqual([{ kind: "clipboard" }]);
   });
 
+  it("explains a nothing-to-export failure instead of a bare Failed", async () => {
+    await loadSidebar();
+    emit(contextLoaded);
+    emit({ type: "conversationRestored", messages: [{ role: "assistant", content: "S", timestamp: "t" }] });
+    runtimeSendResponse = { kind: "exportResult", payload: { ok: false, reason: "nothing-to-export", detail: "None of the selected sections has content." } };
+
+    const btn = app().querySelector(".btn-export") as HTMLButtonElement;
+    btn.click();
+    await flush();
+
+    expect(btn.textContent).toBe("✗ Nothing to export");
+    expect(btn.title).toBe("None of the selected sections has content.");
+  });
+
   it("answers clipboardWrite port messages with clipboardResult", async () => {
     const writeText = vi.fn(async () => {});
     Object.defineProperty(navigator, "clipboard", {

@@ -3,7 +3,7 @@
  * settings manager and the options page so both reject the same values.
  */
 
-/** Below this, the CF-3.8 budget (tokens × 3 chars) is too small to hold any useful prompt. */
+/** Below this, the CF-3.8 budget (tokens × 4 chars, minus the 25% reserved for the reply) is too small to hold any useful prompt. */
 export const MIN_CONTEXT_WINDOW_TOKENS = 512;
 
 /** Sanity ceiling — comfortably above any real model's window today. */
